@@ -15,7 +15,12 @@ from .strategy import Book
 
 
 def iso_time(value):
-    return datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp()
+    if not isinstance(value, str):
+        raise ValueError('ISO timestamp must be a string with an explicit timezone')
+    parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError('ISO timestamp requires an explicit timezone')
+    return parsed.timestamp()
 
 
 def fingerprint(value):
@@ -190,8 +195,55 @@ class Sig:
         return self.read('/orders/' + str(int(order_id)))
 
     def fills(self, order_id):
-        # Lifecycle totals cover every fill even when the returned page is limited.
-        return self.read('/orders/' + str(int(order_id)) + '/fills', params={'limit': 1})
+        """Read the complete closed-order fill history, retaining lifecycle totals.
+
+        Never acknowledge a partial/inconsistent history as complete: a failure
+        leaves the engine's reservation intact for reconciliation.
+        """
+        from .strategy import D
+        path = '/orders/' + str(int(order_id)) + '/fills'
+        params, rows, seen_ids, seen_cursors = {'limit': 100}, [], set(), set()
+        first, identity, total, average = None, None, None, None
+        for page_number in range(100):
+            page = self.read(path, params=dict(params))
+            if (str(page['orderId']) != str(int(order_id)) or page['tournamentId'] != self.tid
+                    or page.get('coverage', {}).get('complete') is not True):
+                raise RuntimeError('Fill page identity/coverage mismatch; reservation retained')
+            page_identity = (str(page['orderId']), str(page['exchangeId']), page['tournamentId'])
+            page_total = D(page['totalQuantityFilled'])
+            page_average = D(page['avgFillPrice']) if page_total else None
+            if first is None:
+                first, identity, total, average = page, page_identity, page_total, page_average
+            elif (identity, total, average) != (page_identity, page_total, page_average):
+                raise RuntimeError('Fill history changed during pagination; reservation retained')
+            if not isinstance(page.get('data'), list):
+                raise RuntimeError('Malformed fill rows; reservation retained')
+            for row in page['data']:
+                fill_id = str(row['id'])
+                quantity, price = D(row['quantity']), D(row['price'])
+                if (not fill_id.isdigit() or int(fill_id) <= 0 or fill_id in seen_ids
+                        or quantity == 0 or quantity != int(quantity) or not 0 < price < 1
+                        or row['side'] not in ('yes', 'no')
+                        or (quantity < 0) != (row['side'] == 'no')
+                        or (quantity < 0) != (total < 0)):
+                    raise RuntimeError('Invalid or repeated fill row; reservation retained')
+                iso_time(row['filledAt'])  # Explicit timezone required on every page.
+                seen_ids.add(fill_id)
+                rows.append(row)
+            pagination = page['pagination']
+            if type(pagination.get('hasMore')) is not bool:
+                raise RuntimeError('Malformed fill pagination; reservation retained')
+            if not pagination['hasMore']:
+                if sum((D(row['quantity']) for row in rows), D(0)) != total:
+                    raise RuntimeError('Fill rows disagree with lifecycle quantity; reservation retained')
+                return {**first, 'data': rows, 'pagination': pagination, 'pages_read': page_number+1}
+            cursor = pagination.get('nextCursor')
+            if (not page['data'] or not isinstance(cursor, str) or not cursor
+                    or cursor in seen_cursors):
+                raise RuntimeError('Incomplete fill pagination; reservation retained')
+            seen_cursors.add(cursor)
+            params['cursor'] = cursor
+        raise RuntimeError('Fill pagination limit exceeded; reservation retained')
 
     def read(self, path, params=None):
         # Retrying a GET cannot resubmit a trade. Persistent errors

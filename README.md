@@ -68,6 +68,9 @@ For each enabled race, the bot normalizes both external books to the SIG YES out
 | Per-order spending | 50 SUSQies |
 | Per-race risk capital | 250 SUSQies |
 | Total risk capital | 25,000 SUSQies |
+| Net directional shares, total | 5,000 shares |
+| Net directional shares, per office | 2,500 shares |
+| Cumulative net realized-loss stop | 2,500 SUSQies (10% of total risk capital) |
 | Gross daily buy spending, UTC | 5,000 SUSQies |
 | Maximum shares/order | 100 |
 | Minimum reference top-bid depth | 20 shares on each venue |
@@ -83,9 +86,13 @@ The user configuration now enables the inventory-aware execution mode. It buys q
 
 Risk capital is **open position cost (including entry buffers) plus net realized losses plus unresolved reservations**, globally and per race. Confirmed sales release the cost of the shares sold; losses continue consuming capital, while profits do not expand the configured allowance. The daily cap remains gross buy spending and is not replenished by sales. Each order, including a sale, is limited to 50 coins of notional and available depth. Existing bot purchases are imported from SIG's confirmed lifecycle fill totals on restart; the journal is not reset. Unconfirmed fills halt further submissions.
 
-Only bot-owned inventory is eligible for automatic sales. Account holdings must match the bot's reconstructed position; mismatches pause that race. SIG has no reduce-only parameter in the reviewed API: a sell exceeding holdings can become a complement buy. Avoid concurrent manual trading or another bot on these same positions. This bot checks holdings just before submission, serializes its own writes, verifies the canonical response and cancels its own remainder before halting on a mismatch, but cannot make the remote position check and submission atomic. Settled positions require separate settlement accounting review and are not automatically recycled. The one-contract-per-race rule remains; different races can still be correlated.
+Only bot-owned inventory is eligible for automatic sales. Account holdings must match the bot's reconstructed position; with portfolio controls enabled, mismatches halt new trading across the portfolio. SIG has no reduce-only parameter in the reviewed API: a sell exceeding holdings can become a complement buy. Avoid concurrent manual trading or another bot on these same positions. This bot checks holdings just before submission, serializes its own writes, verifies the canonical response and cancels its own remainder before halting on a mismatch, but cannot make the remote position check and submission atomic. Settled positions require separate settlement accounting review and are not automatically recycled. The one-contract-per-race rule remains; different races can still be correlated.
 
 `execution.enabled: false` selects the earlier cumulative-spending, buy-only engine. Do not switch accounting modes or change cost buffers mid-run. The example configuration keeps this mode disabled until mappings and limits are configured.
+
+The additional portfolio controls size both buys and sales against signed exposure, including pending fills. They retain the existing gross coin limits. The realized-loss stop persists through `.runtime/STOP`; it does **not** measure losses on unsold positions or liquidate holdings. With these controls enabled, account-wide inventory mismatches halt portfolio trading. See [portfolio controls](docs/portfolio-controls.md) for configuration, offsetting positions, recovery, timezone validation and the new three-venue quote snapshots.
+
+Complete fill-history pagination now anchors new measurements to the last fill. Persistent disputed-result flags identify held positions needing review and remain until explicitly cleared. See [accounting and dispute handling](docs/accounting-and-disputes.md) for behavior, diagnostics and review commands.
 
 ## Performance and diagnostics
 
@@ -141,9 +148,9 @@ For mapped races:
 
 - A fresh matching story wakes the price loop and prioritizes that race's SIG/Kalshi/Polymarket book checks. The existing order cooldown and all spending limits still apply.
 - `news_review` records a **paper-only assessment** of the existing price-gap signal, the story, and any entry block. This is not an independently trained news valuation model. In `--live` mode a price-gap trade can still execute if all ordinary controls pass; news never sets fair value, changes quantity limits, or bypasses a guard.
-- Headlines flagged as candidate withdrawals, ballot/candidate eligibility changes or disputed results pause new entries in the matching race for 15 minutes. The included publishers are permitted to trigger these precautionary pauses, but their articles are not independently fact-checked by this code. Basic negation/speculation filtering reduces false alarms; it cannot interpret every headline correctly. Pauses expire automatically; duplicates do not extend them. A different qualifying story can extend a pause.
+- Headlines flagged as candidate withdrawals or ballot/candidate eligibility changes pause the matching race for 15 minutes. Disputed results create a persistent review flag that blocks entries and automatic exits until explicitly cleared. The included publishers are permitted to trigger these precautionary pauses, but their articles are not independently fact-checked by this code. Basic negation/speculation filtering reduces false alarms; it cannot interpret every headline correctly. Timed pauses expire automatically; duplicates do not extend them. A different qualifying story can extend a timed pause. Disputed-result review flags do not expire automatically.
 - News older than six hours, missing a publication timezone/time, or more than 60 seconds in the future cannot trigger an alert or pause. Old headlines remain visible with their eligibility status. Identical normalized headlines are deduplicated across publishers and restarts; a retimestamped copy cannot make an old headline new.
-- If **all configured feeds** lack a successful check for five minutes, automatic trading pauses until at least one source recovers. Active news uncertainty pauses also block valuation-based exits. An individual failed feed is reported without stopping the others. This checks source availability, not complete news coverage. Existing holdings remain in place, and in-flight orders can still fill.
+- If **all configured feeds** lack a successful check for five minutes, automatic trading pauses until at least one source recovers. Active news uncertainty pauses also block valuation-based exits. Disputed-result flags persist beyond the timer until an explicit, recorded review clears each article/mapping flag. An individual failed feed is reported without stopping the others. This checks source availability, not complete news coverage. Existing holdings remain in place, and in-flight orders can still fill.
 
 Check source health, recent headlines, active pauses and the most recent paper assessments from another terminal in this folder:
 

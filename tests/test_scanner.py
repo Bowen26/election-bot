@@ -55,8 +55,8 @@ class ExpandedEngineTests(unittest.TestCase):
 
     def test_more_than_five_supported_and_duplicate_race_rejected(self):
         base = self.config['markets'][0]
-        self.config['markets'] = [dict(base, name=str(i), sig_market_id=str(i),
-                                      sig_exchange_id=str(i), race_key=str(i)) for i in range(120)]
+        self.config['markets'] = [dict(base, name=str(i), sig_market_id=str(i+1),
+                                      sig_exchange_id=str(i+1), race_key=str(i)) for i in range(120)]
         validate_config(self.config)
         self.config['markets'][-1]['race_key'] = '0'
         with self.assertRaisesRegex(ValueError, 'one contract per race'):

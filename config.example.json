@@ -82,7 +82,9 @@
       "polymarket_market": "will-the-democrats-win-the-new-hampshire-senate-race-in-2026",
       "kalshi_yes_matches_sig_yes": true,
       "polymarket_yes_matches_sig_yes": true,
-      "contract_fingerprint": null
+      "contract_fingerprint": null,
+      "office": "senate",
+      "exposure_sign": 1
     }
   ],
   "execution": {

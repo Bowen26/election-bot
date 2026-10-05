@@ -34,6 +34,7 @@ def main():
         if len(poly) != 1 or len(km) != 1:
             raise ValueError('Missing or ambiguous external party contract: ' + state)
         mapping = {'name': code.lower()+'-senate-democratic', 'enabled': False,
+                   'office': 'senate', 'exposure_sign': 1,
                    'news_match': {'all': [[state], ['Senate', 'Senator']], 'exclude': ['state senate']},
                    'sig_market_id': str(matches[0]['id']),
                    'sig_exchange_id': str(matches[0]['exchanges'][0]['id']),

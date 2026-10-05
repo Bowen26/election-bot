@@ -83,6 +83,7 @@ def main():
                                  state + "'s " + str(int(number)) + ' congressional district']], 'exclude': []}
             mapping = {'name': (code + '-' + (number + '-' if district else '') + office + '-democratic').lower(),
                 'race_key': '2026:' + office.lower() + ':' + (label if district else code),
+                'office': office.lower(), 'exposure_sign': 1,
                 'enabled': False, 'news_match': news, 'sig_market_id': str(market['id']),
                 'sig_exchange_id': str(market['exchanges'][0]['id']),
                 'kalshi_ticker': ticker, 'polymarket_event': event['slug'], 'polymarket_market': pm[0]['slug'],

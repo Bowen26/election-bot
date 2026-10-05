@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 import json
+import re
 from pathlib import Path
 import time
 import uuid
@@ -11,7 +12,6 @@ from .scanner import Scanner
 
 
 def validate_config(config):
-    validate_news(config)
     execution = config.get('execution', {})
     if execution.get('enabled'):
         if type(execution.get('priority_scanning', True)) is not bool:
@@ -42,6 +42,37 @@ def validate_config(config):
         raise ValueError('Order lifetime must be 10–60 seconds')
     if config['poll_seconds'] < 10 or config['cooldown_seconds'] < 10:
         raise ValueError('Poll/cooldown must be at least 10 seconds')
+    from .risk import validate_risk_config
+    if not isinstance(config.get('markets'), list):
+        raise ValueError('markets must be a list')
+    names = set()
+    for mapping in config['markets']:
+        if not isinstance(mapping, dict) or type(mapping.get('enabled')) is not bool:
+            raise ValueError('Each mapping requires a boolean enabled field')
+        if not mapping['enabled']:
+            continue
+        label = mapping.get('name', '<unnamed>')
+        for field in ('name', 'sig_market_id', 'sig_exchange_id', 'kalshi_ticker',
+                      'polymarket_event', 'polymarket_market'):
+            value = mapping.get(field)
+            if not isinstance(value, str) or not value.strip() or value != value.strip():
+                raise ValueError('Mapping %s requires a nonempty %s' % (label, field))
+            if value.startswith('REPLACE_'):
+                raise ValueError('Mapping %s still has a placeholder %s' % (label, field))
+        for field in ('sig_market_id', 'sig_exchange_id'):
+            if not re.fullmatch(r'[1-9][0-9]*', mapping[field]):
+                raise ValueError('Mapping %s requires a positive integer string %s' % (label, field))
+        for field in ('kalshi_yes_matches_sig_yes', 'polymarket_yes_matches_sig_yes'):
+            if type(mapping.get(field)) is not bool:
+                raise ValueError('Mapping %s requires a boolean %s' % (label, field))
+        if not isinstance(mapping.get('contract_fingerprint'), str) or not re.fullmatch(
+                r'[0-9a-f]{64}', mapping['contract_fingerprint']):
+            raise ValueError('Mapping %s requires a reviewed contract_fingerprint' % label)
+        if label in names:
+            raise ValueError('Enabled mapping names must be unique: ' + label)
+        names.add(label)
+    validate_risk_config(config)
+    validate_news(config)
     exchanges = [m['sig_exchange_id'] for m in config['markets'] if m.get('enabled')]
     if len(exchanges) != len(set(exchanges)):
         raise ValueError('Each SIG exchange may appear only once')
@@ -78,7 +109,7 @@ class Engine:
         if not self.live:
             for row in self.journal.pending():
                 # A paper crash cannot have placed an exchange order.
-                self.journal.complete(row['key'], row['amount'])
+                self.journal.complete(row['key'], 0)
             return
         for row in self.journal.pending():
             payload = json.loads(row['payload'])
@@ -235,7 +266,6 @@ class Engine:
                        'tournamentId': self.sig.tid, 'idempotencyKey': str(uuid.uuid4()),
                        'expirationDate': datetime.fromtimestamp(
                            time.time() + self.config['order_lifetime_seconds'], timezone.utc).isoformat()}
-            reserved = signal.quantity * (signal.price + D(self.config['strategy']['cost_buffer_per_share']))
             self.journal.reserve(payload, reserved)
             if self.stopped():
                 self.journal.complete(payload['idempotencyKey'], 0)

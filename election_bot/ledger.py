@@ -19,6 +19,36 @@ def liquidation(book, quantity):
     return D(quantity) - remaining, value
 
 
+def inventory_from_executions(rows):
+    """Pure FIFO reconstruction; rows must be in execution-time/rowid order."""
+    lots, realized = defaultdict(deque), defaultdict(lambda: D(0))
+    for row in rows:
+        asset = (row['exchange'], row['side'])
+        quantity, price, fee = D(row['quantity']), D(row['price']), D(row['buffer'])
+        if not quantity:
+            continue
+        if row['action'] == 'buy':
+            lots[asset].append([quantity, price + fee])
+        elif row['action'] == 'sell':
+            remaining = quantity
+            while remaining and lots[asset]:
+                lot = lots[asset][0]
+                take = min(remaining, lot[0])
+                realized[row['exchange']] += take * (price - fee - lot[1])
+                lot[0] -= take
+                remaining -= take
+                if not lot[0]:
+                    lots[asset].popleft()
+            if remaining:
+                raise RuntimeError('Sell exceeds bot-owned inventory; accounting halted')
+        else:
+            raise RuntimeError('Unknown execution action')
+    holdings = {asset: {'quantity': sum((q for q, p in rows), D(0)), 'lots': list(rows),
+                         'cost': sum((q*p for q, p in rows), D(0))}
+                for asset, rows in lots.items() if rows}
+    return holdings, dict(realized)
+
+
 class Ledger:
     def __init__(self, journal):
         self.journal, self.db = journal, journal.db
@@ -75,32 +105,7 @@ class Ledger:
     def inventory(self):
         if self._cache is not None:
             return self._cache
-        lots, realized = defaultdict(deque), defaultdict(lambda: D(0))
-        for row in self.db.execute('SELECT * FROM executions ORDER BY at,rowid'):
-            asset = (row['exchange'], row['side'])
-            quantity, price, fee = D(row['quantity']), D(row['price']), D(row['buffer'])
-            if not quantity:
-                continue
-            if row['action'] == 'buy':
-                lots[asset].append([quantity, price + fee])
-            elif row['action'] == 'sell':
-                remaining = quantity
-                while remaining and lots[asset]:
-                    lot = lots[asset][0]
-                    take = min(remaining, lot[0])
-                    realized[row['exchange']] += take * (price - fee - lot[1])
-                    lot[0] -= take
-                    remaining -= take
-                    if not lot[0]:
-                        lots[asset].popleft()
-                if remaining:
-                    raise RuntimeError('Sell exceeds bot-owned inventory; accounting halted')
-            else:
-                raise RuntimeError('Unknown execution action')
-        holdings = {asset: {'quantity': sum((q for q, p in rows), D(0)), 'lots': list(rows),
-                             'cost': sum((q*p for q, p in rows), D(0))}
-                    for asset, rows in lots.items() if rows}
-        self._cache = holdings, dict(realized)
+        self._cache = inventory_from_executions(self.db.execute('SELECT * FROM executions ORDER BY at,rowid'))
         return self._cache
 
     def held(self, exchange):

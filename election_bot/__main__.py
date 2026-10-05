@@ -75,6 +75,9 @@ def main():
     news_action = news_command.add_mutually_exclusive_group()
     news_action.add_argument('--once', action='store_true', help='Fetch configured news feeds once')
     news_action.add_argument('--status', action='store_true', help='Show local news, source health and active pauses')
+    news_action.add_argument('--clear-dispute', type=int, metavar='ARTICLE_ID', help='Clear one reviewed dispute flag locally')
+    news_command.add_argument('--mapping', help='Exact mapping name for a dispute review')
+    news_command.add_argument('--note', help='Required explanation for clearing a dispute flag')
     run = sub.add_parser('run', help='Run continuously; paper mode unless --live is supplied')
     run.add_argument('--live', action='store_true', help='Automatically submit SIG competition orders with no per-trade prompts')
     run.add_argument('--once', action='store_true')
@@ -113,7 +116,7 @@ def main():
         result = report(RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3'))
         if args.command == 'diagnostics':
             fields = ('as_of', 'status', 'unresolved_orders', 'quote_diagnostics_last_24h',
-                      'exit_diagnostics_last_24h')
+                      'exit_diagnostics_last_24h', 'position_news_risk')
             result = {k: result[k] for k in fields if k in result}
         output(result)
         return
@@ -167,8 +170,15 @@ def main():
     if args.command == 'news':
         if not config.get('news', {}).get('enabled'):
             raise ValueError('News is not enabled in this configuration')
+        if args.clear_dispute is not None and (not args.mapping or not args.note):
+            raise ValueError('--clear-dispute requires --mapping and --note')
+        if args.clear_dispute is None and (args.mapping or args.note):
+            raise ValueError('--mapping and --note apply only to --clear-dispute')
         store = NewsStore(RUNTIME / 'news.sqlite3')
         try:
+            store.migrate_active_disputes(config)
+            if args.clear_dispute is not None:
+                output(store.clear_dispute(args.clear_dispute, args.mapping, args.note))
             if args.once:
                 with exclusive_lock(RUNTIME / 'news-collector'):
                     output(NewsCollector(config, store).poll())

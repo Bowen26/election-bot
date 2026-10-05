@@ -1,12 +1,14 @@
 """Read-only local reporting. Never opens a broker connection or submits orders."""
 from collections import Counter
 from datetime import datetime, timezone
+from pathlib import Path
 import json
 import math
 import sqlite3
 import time
 
-from .ledger import Ledger
+from .ledger import inventory_from_executions
+from .news import position_dispute_report
 from .diagnostics import quote_summary, exit_summary
 from .measurement import WINDOWS, eligible, tracking_start
 from .strategy import D
@@ -93,6 +95,8 @@ def report(path):
         quote_failures, feed_errors, exits = [], [], []
         for row in db.execute('SELECT * FROM events WHERE at>=? ORDER BY at', (time.time()-86400,)):
             detail = json.loads(row['detail'])
+            if row['kind'] in ('portfolio_risk', 'risk_stop'):
+                result['latest_' + row['kind']] = {'at': row['at'], **detail}
             if row['kind'] == 'skip':
                 reasons[detail.get('reason', 'unknown')] += 1
             if row['kind'] == 'decision':
@@ -127,13 +131,12 @@ def report(path):
         result['executions'] = [dict(r) for r in db.execute('''SELECT action,side,COUNT(*) AS orders,
             SUM(CAST(quantity AS REAL)) AS shares FROM executions WHERE CAST(quantity AS REAL)>0
             GROUP BY action,side''')]
-        # Inventory reconstruction is pure; avoid schema creation on a read-only report.
-        ledger = Ledger.__new__(Ledger)
-        ledger.db, ledger._cache = db, None
-        holdings, realized = ledger.inventory()
+        holdings, realized = inventory_from_executions(
+            db.execute('SELECT * FROM executions ORDER BY at,rowid'))
         result['realized_pnl_after_buffers'] = str(sum(realized.values(), D(0)))
         result['open_cost_with_entry_buffer'] = str(sum((v['cost'] for v in holdings.values()), D(0)))
         result['open_races'] = len({ex for ex, side in holdings})
+        result['position_news_risk'] = position_dispute_report(Path(path).parent / 'news.sqlite3', holdings)
         pending = sum((D(r[0]) for r in db.execute("SELECT amount FROM orders WHERE state='pending'")), D(0))
         result['risk_committed'] = str(D(result['open_cost_with_entry_buffer']) +
                                       max(D(0), -D(result['realized_pnl_after_buffers'])) + pending)

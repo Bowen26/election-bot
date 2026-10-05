@@ -1,6 +1,6 @@
 """Read-only RSS/Atom collection. Feed text is data, never executable instructions.
 
-Headlines can request a price refresh or temporarily block entries. They cannot
+Headlines can request a price refresh or flag a race for review. They cannot
 set prices, increase budgets, enable markets, or call any trading API.
 """
 from dataclasses import dataclass
@@ -228,6 +228,11 @@ class NewsStore:
             market TEXT PRIMARY KEY, until REAL NOT NULL, article INTEGER NOT NULL);
           CREATE TABLE IF NOT EXISTS risk_flags (
             article INTEGER NOT NULL, market TEXT NOT NULL, PRIMARY KEY(article,market));
+          CREATE TABLE IF NOT EXISTS disputes (
+            article INTEGER NOT NULL, market TEXT NOT NULL, exchange TEXT NOT NULL,
+            flagged_at REAL NOT NULL, cleared_at REAL, review_note TEXT,
+            PRIMARY KEY(article,market));
+          CREATE INDEX IF NOT EXISTS disputes_open_exchange ON disputes(exchange,cleared_at);
           CREATE TABLE IF NOT EXISTS feeds (
             name TEXT PRIMARY KEY, url TEXT NOT NULL, last_attempt REAL, last_success REAL,
             last_error TEXT, etag TEXT, modified TEXT, items INTEGER);
@@ -289,6 +294,11 @@ class NewsStore:
                     if new_risk:
                         # A later permitted source can flag a story first seen on an alert-only source.
                         count += 0 if inserted else 1
+                        if category == 'disputed_result':
+                            exchange = next(m['sig_exchange_id'] for m in config['markets']
+                                            if m.get('enabled') and m.get('name') == market)
+                            self.db.execute('INSERT OR IGNORE INTO disputes VALUES (?,?,?,?,NULL,NULL)',
+                                            (aid, market, str(exchange), now))
                         self.db.execute('INSERT INTO pauses VALUES (?,?,?) ON CONFLICT(market) DO UPDATE SET '
                                         'until=MAX(pauses.until,excluded.until),article=excluded.article',
                                         (market, now+settings['pause_seconds'], aid))
@@ -306,8 +316,40 @@ class NewsStore:
                 self.db.execute('INSERT OR REPLACE INTO cursors VALUES (?,?)', (consumer, rows[-1]['event_id']))
         return [dict(r) for r in rows if time.time()-r['published'] <= max_age]
 
-    def block_reason(self, market, settings):
+    def migrate_active_disputes(self, config):
+        """Preserve active legacy dispute pauses, without reviving expired history."""
+        exchanges = {m['name']: str(m['sig_exchange_id']) for m in config['markets']
+                     if m.get('name') and m.get('sig_exchange_id')}
+        with self.db:
+            for row in self.db.execute("SELECT p.*,a.first_seen FROM pauses p JOIN articles a ON a.id=p.article "
+                                       "WHERE p.until>? AND a.category='disputed_result'", (time.time(),)):
+                if row['market'] in exchanges:
+                    self.db.execute('INSERT OR IGNORE INTO disputes VALUES (?,?,?,?,NULL,NULL)',
+                        (row['article'], row['market'], exchanges[row['market']], row['first_seen']))
+
+    def clear_dispute(self, article, market, note):
+        if type(article) is not int or article <= 0 or not isinstance(market, str) or not market.strip():
+            raise ValueError('A positive article ID and exact mapping name are required')
+        if not isinstance(note, str) or not 1 <= len(note.strip()) <= 1000:
+            raise ValueError('A review note of 1–1000 characters is required')
+        with self.db:
+            row = self.db.execute('SELECT * FROM disputes WHERE article=? AND market=?',
+                                  (article, market)).fetchone()
+            if row is None or row['cleared_at'] is not None:
+                raise ValueError('No unresolved dispute matches that article and mapping')
+            self.db.execute('UPDATE disputes SET cleared_at=?,review_note=? WHERE article=? AND market=?',
+                            (time.time(), note.strip(), article, market))
+            # Do not erase a newer pause or another unresolved dispute.
+            self.db.execute('DELETE FROM pauses WHERE market=? AND article=?', (market, article))
+        return {'article': article, 'market': market, 'cleared': True, 'review_note': note.strip()}
+
+    def block_reason(self, market, settings, exchange=None):
         now = time.time()
+        dispute = self.db.execute('SELECT article FROM disputes WHERE cleared_at IS NULL '
+                                 'AND (market=? OR exchange=?) ORDER BY flagged_at LIMIT 1',
+                                 (market, str(exchange) if exchange is not None else None)).fetchone()
+        if dispute:
+            return 'Disputed-result review required (article %s); entries and exits paused' % dispute['article']
         pause = self.db.execute('SELECT until FROM pauses WHERE market=?', (market,)).fetchone()
         if pause and pause['until'] > now:
             return 'News uncertainty pause until ' + datetime.fromtimestamp(pause['until'], timezone.utc).isoformat()
@@ -318,6 +360,7 @@ class NewsStore:
 
     def status(self):
         return {'feeds': [dict(r) for r in self.db.execute('SELECT name,last_attempt,last_success,last_error,items FROM feeds')],
+                'unresolved_disputes': unresolved_disputes(self.db),
                 'active_pauses': [dict(r) for r in self.db.execute('SELECT * FROM pauses WHERE until>?', (time.time(),))],
                 'article_count': self.db.execute('SELECT COUNT(*) FROM articles').fetchone()[0],
                 'recent': [dict(r) for r in self.db.execute('SELECT title,url,source,published,first_seen,category,states,eligibility '
@@ -355,6 +398,7 @@ class NewsGate:
         validate_news(config)
         self.config, self.runtime, self.consumer = config, Path(runtime), consumer
         self.store = NewsStore(self.runtime / 'news.sqlite3')
+        self.store.migrate_active_disputes(config)
         self.wake = threading.Event()
         self.stop_event = threading.Event()
         self.thread = None
@@ -391,10 +435,48 @@ class NewsGate:
         return grouped
 
     def block_reason(self, mapping):
-        return self.store.block_reason(mapping['name'], self.config['news'])
+        return self.store.block_reason(mapping['name'], self.config['news'], mapping['sig_exchange_id'])
 
     def close(self):
         self.stop_event.set()
         if self.thread:
             self.thread.join(timeout=7)
         self.store.close()
+
+
+def unresolved_disputes(db):
+    return [dict(row) for row in db.execute(
+        "SELECT d.article,d.market,d.exchange,d.flagged_at,a.title,a.url,a.source "
+        "FROM disputes d LEFT JOIN articles a ON a.id=d.article "
+        "WHERE d.cleared_at IS NULL ORDER BY d.flagged_at,d.article,d.market")]
+
+
+def position_dispute_report(path, holdings):
+    """Read news flags without creating/migrating the news database or reading keys."""
+    path = Path(path).resolve()
+    result = {'available': False, 'positions': [],
+              'note': 'Heuristic news flags require review; they are not verified results or valuations. '
+                      'News and inventory are separate snapshots. Flags do not liquidate positions.'}
+    if not path.exists():
+        result['reason'] = 'News database unavailable'
+        return result
+    try:
+        db = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=5)
+        try:
+            db.row_factory = sqlite3.Row
+            db.execute('BEGIN')
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='disputes'").fetchone():
+                result['reason'] = 'Restart the updated news monitor to enable persistent dispute tracking'
+                return result
+            flags = unresolved_disputes(db)
+        finally:
+            db.close()
+        result['available'] = True
+        for flag in flags:
+            for (exchange, side), value in holdings.items():
+                if exchange == flag['exchange']:
+                    result['positions'].append({**flag, 'side': side, 'quantity': str(value['quantity']),
+                        'cost_with_entry_buffer': str(value['cost']), 'status': 'disputed_result_review_required'})
+    except sqlite3.Error:
+        result['reason'] = 'News database could not be read; flag status is unknown'
+    return result

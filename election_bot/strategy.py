@@ -99,7 +99,7 @@ class Signal:
     reason: str = 'entry_gap'
 
 
-def choose(sig, references, settings, available, diagnostics=None):
+def choose(sig, references, settings, available, diagnostics=None, side_limits=None):
     """Buy only when both reference bids support a conservative price gap.
 
     Reference bids are evidence, not a guaranteed probability or hedge.
@@ -138,7 +138,11 @@ def choose(sig, references, settings, available, diagnostics=None):
         price, depth = executable[0]
         if price % tick != 0 or not (tick <= price <= 1-tick):
             raise ValueError("SIG price is not a valid limit-order tick")
-        quantity = int(min(D(settings['max_shares_per_order']), depth,
+        share_limit = (D(side_limits[side]) if side_limits is not None
+                       else D(settings['max_shares_per_order']))
+        if side_limits is not None:
+            check['exposure_headroom'] = str(share_limit)
+        quantity = int(min(share_limit, D(settings['max_shares_per_order']), depth,
                            min(b.bids[0][1] for b in refs),
                            D(available) / (price + fee)))
         if quantity > 0:
@@ -146,11 +150,11 @@ def choose(sig, references, settings, available, diagnostics=None):
             candidates.append(Signal(side, price, quantity, reference,
                                      reference-price-fee))
         else:
-            check['reason'] = 'budget_or_target_depth'
+            check['reason'] = 'exposure_limit' if share_limit < 1 else 'budget_or_target_depth'
     return max(candidates, key=lambda s: s.edge) if candidates else None
 
 
-def choose_exit(sig, references, settings, execution, held, cost, per_order, diagnostics=None):
+def choose_exit(sig, references, settings, execution, held, cost, per_order, diagnostics=None, quantity_cap=None):
     """Sell owned shares when overpriced, or when a profitable gap has converged."""
     detail = diagnostics if diagnostics is not None else {}
     detail.update(status='not_applicable', reason='no_position')
@@ -192,10 +196,13 @@ def choose_exit(sig, references, settings, execution, held, cost, per_order, dia
         detail['reason'] = ('price_not_converged' if price < max(r.bids[0][0] for r in refs)
                             else 'profit_below_minimum')
         return None
-    quantity = int(min(abs(D(held)), depth, D(settings['max_shares_per_order']),
+    share_limit = abs(D(held)) if quantity_cap is None else D(quantity_cap)
+    if quantity_cap is not None:
+        detail['exposure_headroom'] = str(share_limit)
+    quantity = int(min(share_limit, abs(D(held)), depth, D(settings['max_shares_per_order']),
                        min(r.asks[0][1] for r in refs), D(per_order) / price))
     if not quantity:
-        detail['reason'] = 'size_below_one_share'
+        detail['reason'] = 'exposure_limit' if share_limit < 1 else 'size_below_one_share'
         return None
     detail.update(status='eligible', reason='overpriced_exit' if overpriced else 'convergence_take_profit',
                   quantity=quantity)

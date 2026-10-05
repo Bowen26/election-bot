@@ -1,6 +1,7 @@
 """Inventory-aware execution with reusable capital and measured decisions."""
 from datetime import datetime, timezone
 import json
+import math
 import time
 import uuid
 
@@ -8,6 +9,7 @@ from .clients import APIError, contract_record, fingerprint, iso_time
 from .engine import Engine
 from .ledger import Ledger
 from .scanner import ScanInterest
+from .risk import Exposure, LOSS_FIELD, verify_account_inventory
 from .strategy import BookValidationError, D, choose, choose_exit
 
 
@@ -81,11 +83,14 @@ class ActiveEngine(Engine):
         if quantity and ((payload['action'] == 'buy' and price > D(payload['price'])) or
                          (payload['action'] == 'sell' and price < D(payload['price']))):
             raise RuntimeError('Fill outside limit; reservation retained')
+        if quantity and not fills['data']:
+            raise RuntimeError('Nonzero fill has no timestamped rows; reservation retained')
         at = max((iso_time(r['filledAt']) for r in fills['data']), default=iso_time(order['createdAt']))
         self.ledger.record(payload, quantity, price, self.config['strategy']['cost_buffer_per_share'], at)
         self.report('order_closed', {'order_id': oid, 'exchange': payload['exchangeId'],
                     'action': payload['action'], 'side': payload['side'], 'filled': quantity,
                     'average_fill_price': price, **self.ledger.summary()})
+        self.check_loss_stop()
 
     def sync_history(self):
         for row in self.ledger.missing():
@@ -151,15 +156,65 @@ class ActiveEngine(Engine):
             D(limits['total']) - self.ledger.committed(),
             D(limits['daily']) - self.journal.used(today=True)))
 
+    def loss_status(self):
+        _, realized = self.ledger.inventory()
+        net = sum(realized.values(), D(0))
+        fraction = self.config['limits'].get(LOSS_FIELD)
+        threshold = D(fraction) * D(self.config['limits']['total']) if fraction is not None else None
+        return {'realized_pnl_after_buffers': net, 'net_realized_loss': max(D(0), -net),
+                'realized_loss_stop_coins': threshold,
+                'includes_unrealized_losses': False}
+
+    def check_loss_stop(self):
+        status = self.loss_status()
+        threshold = status['realized_loss_stop_coins']
+        if threshold is None or status['net_realized_loss'] < threshold:
+            return False
+        # A persistent STOP survives restart; resume rechecks the same loss threshold.
+        already_stopped = self.stopped()
+        self.runtime.mkdir(parents=True, exist_ok=True)
+        (self.runtime / 'STOP').touch(mode=0o600)
+        if not already_stopped:
+            self.report('risk_stop', {'reason': 'net_realized_loss_limit', **status})
+        return True
+
+    def record_quote_snapshot(self, mapping, book, refs, phase):
+        now = time.time()
+        self.latest_snapshot_id = str(uuid.uuid4())
+        quotes = []
+        for venue, quote in zip(('SIG', 'Kalshi', 'Polymarket'), [book] + list(refs)):
+            bid = quote.bids[0] if quote.bids else None
+            ask = quote.asks[0] if quote.asks else None
+            quotes.append({'venue': venue, 'bid': bid, 'ask': ask,
+                'midpoint': (bid[0]+ask[0])/2 if bid and ask else None,
+                'observed_at': quote.observed_at if math.isfinite(quote.observed_at) else None,
+                'source_at': quote.source_at if math.isfinite(quote.source_at) else None,
+                'timestamp_basis': quote.timestamp_basis,
+                'quality': quote.diagnostic(self.config['strategy']['max_age_seconds'],
+                    self.config['strategy']['max_reference_spread'] if venue != 'SIG' else None,
+                    venue=venue, now=now)})
+        # Journal only: avoid flooding the trading console with every quote.
+        self.journal.event('quote_snapshot', {'version': 1, 'snapshot_id': self.latest_snapshot_id,
+            'exchange': mapping['sig_exchange_id'], 'phase': phase, 'captured_at': now,
+            'orientation': 'SIG YES (references already aligned)', 'quotes': quotes})
+
     def decide(self, mapping, account, positions, book, refs, phase='scan'):
         exchange = mapping['sig_exchange_id']
+        self.record_quote_snapshot(mapping, book, refs, phase)
+        exposure = Exposure(self.ledger, self.config)
+        if exposure.enabled and self.live:
+            verify_account_inventory(self.ledger, positions)
         held, cost = self.held(exchange, positions)
+        side_limits = ({side: exposure.headroom(exchange, 'buy', side) for side in ('yes', 'no')}
+                       if exposure.enabled else None)
+        exit_limit = (exposure.headroom(exchange, 'sell', 'yes' if held > 0 else 'no')
+                      if exposure.enabled and held else None)
         diagnostics = []
         exit_check = {'status': 'blocked' if held else 'not_applicable',
                       'reason': 'selling_disabled' if held else 'no_position'}
-        entry = choose(book, refs, self.config['strategy'], self.available(exchange, account), diagnostics)
+        entry = choose(book, refs, self.config['strategy'], self.available(exchange, account), diagnostics, side_limits)
         exit_signal = choose_exit(book, refs, self.config['strategy'], self.execution, held, cost,
-                                  self.config['limits']['per_order'], exit_check) if self.execution['sell_enabled'] else None
+                                  self.config['limits']['per_order'], exit_check, exit_limit) if self.execution['sell_enabled'] else None
         if exit_signal and exit_signal.reason == 'convergence_take_profit':
             basis = self.ledger.sale_basis(exchange, exit_signal.side, exit_signal.quantity)
             net = exit_signal.price - D(self.config['strategy']['cost_buffer_per_share'])
@@ -177,6 +232,7 @@ class ActiveEngine(Engine):
         self.scan_interest.observe(mapping['name'], diagnostics, refs, self.config['strategy'], held)
         self.report('decision', {'exchange': exchange, 'held': held, 'available': self.available(exchange, account),
             'checks': diagnostics, 'exit_check': exit_check, 'phase': phase,
+            'snapshot_id': self.latest_snapshot_id, 'exposure': exposure.summary(),
             'action': signal.action if signal else None,
             'reason': signal.reason if signal else 'no_eligible_signal'})
         return signal
@@ -234,6 +290,7 @@ class ActiveEngine(Engine):
 
     def cycle(self):
         self.reconcile()
+        self.check_loss_stop()
         if self.stopped():
             return False
         if not self.markets:
@@ -242,6 +299,7 @@ class ActiveEngine(Engine):
             raise ValueError('News monitor is required')
         account = self.sig.account()
         self.check_account(account)
+        self.report('portfolio_risk', {**Exposure(self.ledger, self.config).summary(), **self.loss_status()})
         self.observe_due()
         if self.sig.open_orders():
             self.report('skip', {'reason': 'Existing open orders; trading paused'})
@@ -332,6 +390,16 @@ class ActiveEngine(Engine):
                 self.quote_diagnostics(exchange, book, refs, 'pre_submit', error)
                 self.exit_blocked(exchange, 'quote_validation', 'pre_submit', str(error))
                 raise
+            self.check_account(account)  # Recheck the close cutoff after quote requests.
+            if self.check_loss_stop():
+                return False
+            exposure = Exposure(self.ledger, self.config)
+            if exposure.enabled:
+                if self.live:
+                    verify_account_inventory(self.ledger, positions)
+                if signal.quantity > exposure.headroom(exchange, signal.action, signal.side):
+                    self.report('skip', {'exchange': exchange, 'reason': 'Exposure changed before submission'})
+                    continue
             payload = {'exchangeId': exchange, 'side': signal.side, 'action': signal.action,
                 'quantity': signal.quantity, 'price': float(signal.price), 'tournamentId': self.sig.tid,
                 'idempotencyKey': str(uuid.uuid4()), 'expirationDate': datetime.fromtimestamp(
@@ -342,7 +410,8 @@ class ActiveEngine(Engine):
             if self.stopped() or (self.news and self.news.block_reason(mapping)):
                 self.ledger.record(payload, 0, 0, fee)
                 return not self.stopped()
-            self.report('signal', {'exchange': exchange, **vars(signal)})
+            self.report('signal', {'exchange': exchange, 'order_key': payload['idempotencyKey'],
+                                   'snapshot_id': self.latest_snapshot_id, **vars(signal)})
             if self.live:
                 response = self.sig.place(payload)
                 self.journal.response(payload['idempotencyKey'], response)
@@ -351,6 +420,9 @@ class ActiveEngine(Engine):
                 self.ledger.record(payload, signal.quantity, signal.price, fee)
                 self.report('paper_fill', {'exchange': exchange, **vars(signal), 'simulation': True})
             orders += 1
+            self.check_loss_stop()
+            if self.stopped():
+                return False
             if orders >= self.execution['max_orders_per_cycle']:
                 break
             account = self.sig.account()
