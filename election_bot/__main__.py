@@ -85,6 +85,8 @@ def main():
     sub.add_parser('coverage', help='Show enabled race counts, limits and catalog exclusions; no network')
     performance = sub.add_parser('performance', help='Read local execution, markout and skip diagnostics')
     performance.add_argument('--paper', action='store_true')
+    diagnostics = sub.add_parser('diagnostics', help='Read venue freshness and exit blockers from the local journal')
+    diagnostics.add_argument('--paper', action='store_true')
     args = parser.parse_args()
     if args.command == 'demo':
         from .demo import run_demo
@@ -106,9 +108,14 @@ def main():
         print('Local setup saved. Next: discover --tournaments, then edit ' + str(args.config))
         return
     RUNTIME.mkdir(exist_ok=True, mode=0o700)
-    if args.command == 'performance':
+    if args.command in ('performance', 'diagnostics'):
         from .performance import report
-        output(report(RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3')))
+        result = report(RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3'))
+        if args.command == 'diagnostics':
+            fields = ('as_of', 'status', 'unresolved_orders', 'quote_diagnostics_last_24h',
+                      'exit_diagnostics_last_24h')
+            result = {k: result[k] for k in fields if k in result}
+        output(result)
         return
     if args.command == 'stop':
         (RUNTIME / 'STOP').touch(mode=0o600)

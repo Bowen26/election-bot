@@ -29,11 +29,12 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class APIError(RuntimeError):
-    def __init__(self, message, status=None, retry_after=None, method=None):
+    def __init__(self, message, status=None, retry_after=None, method=None, venue=None):
         super().__init__(message)
         self.status = status
         self.retry_after = retry_after
         self.method = method
+        self.venue = venue
 
 
 class HTTP:
@@ -47,6 +48,8 @@ class HTTP:
         if key and base != 'https://sig.thesuper.market/api/v1':
             raise ValueError("Credentials may only be sent to SIG")
         self.base, self.key = base, key
+        self.venue = ('SIG' if base == 'https://sig.thesuper.market/api/v1' else
+                      'Kalshi' if 'kalshi.com' in base else 'Polymarket')
         self.opener = urllib.request.build_opener(NoRedirect())
         self.last_read = self.last_write = 0.0
         self.server_at = 0.0
@@ -76,7 +79,7 @@ class HTTP:
             with self.opener.open(request, timeout=8) as response:
                 body = response.read(4_000_001)
                 if len(body) > 4_000_000:
-                    raise APIError("API response too large")
+                    raise APIError("API response too large", venue=self.venue)
                 date = response.headers.get('Date')
                 age = float(response.headers.get('Age', '0'))
                 self.server_at = parsedate_to_datetime(date).timestamp() - age if date else started
@@ -95,7 +98,7 @@ class HTTP:
                         pass
             suffix = '; mutation status must be reconciled' if method != 'GET' else ''
             raise APIError("{} {} returned HTTP {}{}".format(method, path, error.code, suffix),
-                           status=error.code, retry_after=retry_after, method=method) from None
+                           status=error.code, retry_after=retry_after, method=method, venue=self.venue) from None
         except (urllib.error.URLError, TimeoutError, OSError) as error:
             reason = getattr(error, 'reason', error)
             # Diagnose common transport failures without logging URLs, headers or credentials.
@@ -106,7 +109,7 @@ class HTTP:
                         'connection refused' if isinstance(reason, ConnectionRefusedError) else
                         type(error).__name__)
             raise APIError("{} {} failed ({})".format(method, path, category),
-                           method=method) from None
+                           method=method, venue=self.venue) from None
 
 
 class Sig:
@@ -167,7 +170,7 @@ class Sig:
             raise ValueError("Wrong SIG exchange or missing book timestamp")
         return Book.make([(r['price'], r['quantity']) for r in data['bids']],
                          [(r['price'], r['quantity']) for r in data['asks']],
-                         iso_time(data['asOf']['at']))
+                         iso_time(data['asOf']['at']), venue='SIG', timestamp_basis='engine_capture')
 
     def open_orders(self):
         return self.collection('/orders', {'status': 'open', 'tournamentId': self.tid})
@@ -246,13 +249,13 @@ class References:
             poly_data = poly_future.result()
         from .strategy import D
         kb = Book.make(data['yes_dollars'], [(1-D(p), q) for p, q in data['no_dollars']],
-                       self.kalshi.server_at)
+                       self.kalshi.server_at, venue='Kalshi', timestamp_basis='http_date_minus_cache_age')
         data = poly_data
         if str(data['asset_id']) != token or data['market'] != poly['conditionId']:
             raise ValueError("Polymarket token/condition mismatch")
         pb = Book.make([(r['price'], r['size']) for r in data['bids']],
                        [(r['price'], r['size']) for r in data['asks']],
-                       float(data['timestamp']) / 1000)
+                       float(data['timestamp']) / 1000, venue='Polymarket', timestamp_basis='exchange_book_timestamp')
         books = [kb, pb]
         for i, field in enumerate(('kalshi_yes_matches_sig_yes', 'polymarket_yes_matches_sig_yes')):
             if not isinstance(mapping[field], bool):

@@ -87,6 +87,7 @@
   ],
   "execution": {
     "enabled": false,
+    "priority_scanning": true,
     "sell_enabled": true,
     "max_orders_per_cycle": 4,
     "metadata_cache_seconds": 900,

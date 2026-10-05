@@ -4,6 +4,7 @@ import json
 import time
 
 from .strategy import D
+from .measurement import WINDOWS, MAX_OBSERVATION_BOOKS, tracking_start
 
 
 def liquidation(book, quantity):
@@ -33,7 +34,14 @@ class Ledger:
             exchange TEXT PRIMARY KEY, at REAL NOT NULL, quantity TEXT NOT NULL,
             executable_quantity TEXT NOT NULL, bid_value TEXT NOT NULL,
             cost TEXT NOT NULL, pnl TEXT);
+          CREATE TABLE IF NOT EXISTS performance_settings (
+            name TEXT PRIMARY KEY, value TEXT NOT NULL);
+          CREATE INDEX IF NOT EXISTS executions_exchange_action_at ON executions(exchange,action,at);
         ''')
+        with self.db:
+            self.db.execute('INSERT OR IGNORE INTO performance_settings VALUES (?,?)',
+                            ('short_horizons_started_at', str(time.time())))
+        self.short_horizons_started_at = tracking_start(self.db)
         self._cache = None
 
     def missing(self):
@@ -125,6 +133,34 @@ class Ledger:
                        if exchange is None or r['market'] == exchange), D(0))
         return cost + max(D(0), -pnl) + pending
 
+    def observation_tasks(self, now, exchange=None):
+        horizons = ','.join('(%d,%d)' % item for item in WINDOWS.items())
+        sql = '''WITH horizons(horizon,window) AS (VALUES %s)
+            SELECT e.*,h.horizon,e.at+h.horizon AS due,e.at+h.horizon+h.window AS deadline
+            FROM executions e CROSS JOIN horizons h
+            LEFT JOIN markouts m ON m.key=e.key AND m.horizon=h.horizon
+            WHERE e.action='buy' AND CAST(e.quantity AS REAL)>0 AND m.key IS NULL
+              AND (h.horizon>=3600 OR e.at>=?) AND e.at+h.horizon<=?''' % horizons
+        args = [self.short_horizons_started_at, now]
+        if exchange is not None:
+            sql += ' AND e.exchange=?'
+            args.append(exchange)
+        return self.db.execute(sql + ' ORDER BY deadline,e.at,e.key', args).fetchall()
+
+    def expire_observations(self, now=None):
+        now = time.time() if now is None else now
+        with self.db:
+            for row in self.observation_tasks(now):
+                if now > row['deadline']:
+                    self.db.execute('INSERT OR IGNORE INTO markouts VALUES (?,?,?,?,?)',
+                        (row['key'], row['horizon'], now, None, 'Observation window missed'))
+
+    def due_exchanges(self, now=None, limit=MAX_OBSERVATION_BOOKS):
+        now = time.time() if now is None else now
+        self.expire_observations(now)
+        # One book can measure several fills and horizons in the same market.
+        return list(dict.fromkeys(row['exchange'] for row in self.observation_tasks(now)))[:limit]
+
     def observe(self, exchange, book, max_age, now=None):
         book.check(max_age)
         now = time.time() if now is None else now
@@ -139,26 +175,22 @@ class Ledger:
         else:
             with self.db:
                 self.db.execute('DELETE FROM valuations WHERE exchange=?', (exchange,))
-        for row in self.db.execute("SELECT * FROM executions WHERE exchange=? AND action='buy'", (exchange,)).fetchall():
-            if D(row['quantity']) == 0:
-                continue
-            for horizon in (3600, 86400):
-                age = now - row['at']
-                if age < horizon or self.db.execute('SELECT 1 FROM markouts WHERE key=? AND horizon=?',
-                                                    (row['key'], horizon)).fetchone():
-                    continue
-                pnl, reason = None, None
-                if age > horizon + max(300, horizon / 4):
-                    reason = 'Observation window missed'
-                else:
-                    outcome = book if row['side'] == 'yes' else book.complement()
-                    qty, value = liquidation(outcome, D(row['quantity']))
-                    if qty < D(row['quantity']):
-                        continue  # Retry during the window; a thin top bid is not a full exit.
-                    pnl = str(value - qty * (D(row['price']) + 2*D(row['buffer'])))
+        for row in self.observation_tasks(now, exchange):
+            if now > row['deadline']:
                 with self.db:
-                    self.db.execute('INSERT INTO markouts VALUES (?,?,?,?,?)',
-                                    (row['key'], horizon, now, pnl, reason))
+                    self.db.execute('INSERT OR IGNORE INTO markouts VALUES (?,?,?,?,?)',
+                        (row['key'], row['horizon'], now, None, 'Observation window missed'))
+                continue
+            if book.source_at < row['due'] or book.observed_at < row['due']:
+                continue  # A recent quote can still predate this particular horizon.
+            outcome = book if row['side'] == 'yes' else book.complement()
+            qty, value = liquidation(outcome, D(row['quantity']))
+            if qty < D(row['quantity']):
+                continue  # No full-size exit available; retry within the window.
+            pnl = str(value - qty * (D(row['price']) + 2*D(row['buffer'])))
+            with self.db:
+                self.db.execute('INSERT OR IGNORE INTO markouts VALUES (?,?,?,?,?)',
+                                (row['key'], row['horizon'], now, pnl, None))
 
     def summary(self):
         holdings, realized = self.inventory()

@@ -191,6 +191,153 @@ class ActiveTests(unittest.TestCase):
         self.assertLess(self.engine.ledger.committed(), D('24.4'))
         self.assertGreater(D(self.engine.ledger.summary()['realized_pnl_after_buffers']), 0)
 
+    def test_near_entry_priority_does_not_relax_trade_threshold(self):
+        self.sig.prices['2'] = ('.67', '.69')
+        self.engine.cycle()
+        name = self.config['markets'][0]['name']
+        self.assertIn('near_entry', self.engine.scan_hints()[name]['reasons'])
+        self.assertFalse(self.sig.orders)
+
+    def test_owned_positions_and_order_cooldown_feed_scheduler(self):
+        self.engine.cycle()
+        name = self.config['markets'][0]['name']
+        hint = self.engine.scan_hints()[name]
+        self.assertIn('owned_position', hint['reasons'])
+        self.assertGreater(hint['not_before'], time.time())
+        self.engine.execution['priority_scanning'] = False
+        self.assertIsNone(self.engine.scan_hints())
+
+    def test_cooldown_retains_news_and_does_not_count_as_quote(self):
+        self.engine.cycle()
+        name = self.config['markets'][0]['name']
+        self.engine.pending_news[name] = [{'event_id': 1}]
+        before = self.journal.db.execute("SELECT COUNT(*) FROM events WHERE kind='scan_quote'").fetchone()[0]
+        self.engine.cycle()
+        self.assertIn(name, self.engine.pending_news)
+        self.assertEqual(self.journal.db.execute("SELECT COUNT(*) FROM events WHERE kind='scan_quote'").fetchone()[0], before)
+
+    def test_final_preflight_is_not_double_counted_as_quote_visit(self):
+        self.engine.cycle()
+        self.assertEqual(self.journal.db.execute("SELECT COUNT(*) FROM events WHERE kind='decision'").fetchone()[0], 2)
+        self.assertEqual(self.journal.db.execute("SELECT COUNT(*) FROM events WHERE kind='scan_quote'").fetchone()[0], 1)
+        stats = report(Path(self.temp.name)/'journal.db')['scan_performance_last_24h']['policies']['priority_v1']
+        self.assertEqual(stats['successful_quote_checks'], 1)
+        self.assertEqual(stats['quote_intervals']['samples'], 0)
+
+    def test_reference_failure_invalidates_interest_and_is_not_successful_quote(self):
+        self.sig.prices['2'] = ('.67', '.69')
+        self.engine.cycle()
+        name = self.config['markets'][0]['name']
+        self.refs.books = Mock(side_effect=APIError('Temporary failure', status=503, method='GET'))
+        self.engine.cycle()
+        self.assertEqual(self.engine.scan_hints()[name]['score'], 0)
+        self.assertEqual(self.journal.db.execute("SELECT COUNT(*) FROM events WHERE kind='scan_visit'").fetchone()[0], 2)
+        self.assertEqual(self.journal.db.execute("SELECT COUNT(*) FROM events WHERE kind='scan_quote'").fetchone()[0], 1)
+
+    def test_priority_toggle_requires_boolean(self):
+        from election_bot.engine import validate_config
+        self.config['execution']['priority_scanning'] = 'false'
+        with self.assertRaisesRegex(ValueError, 'priority_scanning'):
+            validate_config(self.config)
+
+    def test_stale_reference_identifies_venue_and_blocks_owned_exit(self):
+        self.engine.cycle()
+        self.age_orders()
+        original = self.refs.books
+        def stale(mapping, metadata):
+            books = original(mapping, metadata)
+            books[1].source_at = time.time()-60
+            return books
+        self.refs.books = stale
+        self.engine.cycle()
+        detail = json.loads(self.journal.db.execute("SELECT detail FROM events WHERE kind='quote_diagnostics' ORDER BY at DESC LIMIT 1").fetchone()[0])
+        self.assertEqual(detail['phase'], 'scan')
+        failed = [b for b in detail['books'] if b['issues']]
+        self.assertEqual([b['venue'] for b in failed], ['Polymarket'])
+        self.assertIn('source_stale', failed[0]['issues'])
+        blocker = json.loads(self.journal.db.execute("SELECT detail FROM events WHERE kind='exit_blocked' ORDER BY at DESC LIMIT 1").fetchone()[0])
+        self.assertEqual(blocker['reason'], 'quote_validation')
+        self.assertEqual(len(self.sig.orders), 1)
+
+    def test_exit_diagnostics_cover_disabled_and_inventory_mismatch(self):
+        self.engine.cycle()
+        self.age_orders()
+        self.engine.execution['sell_enabled'] = False
+        self.sig.prices['2'] = ('.80', '.85')
+        self.engine.cycle()
+        detail = json.loads(self.journal.db.execute("SELECT detail FROM events WHERE kind='decision' ORDER BY at DESC LIMIT 1").fetchone()[0])
+        self.assertEqual(detail['exit_check']['reason'], 'selling_disabled')
+        self.engine.execution['sell_enabled'] = True
+        self.sig.inventory['2'] -= 1
+        self.engine.cycle()
+        blocker = json.loads(self.journal.db.execute("SELECT detail FROM events WHERE kind='exit_blocked' ORDER BY at DESC LIMIT 1").fetchone()[0])
+        self.assertEqual(blocker['reason'], 'inventory_mismatch')
+        self.assertEqual(len(self.sig.orders), 1)
+
+    def test_sell_scan_and_preflight_diagnostics_are_separate(self):
+        self.engine.cycle()
+        self.age_orders()
+        self.sig.prices['2'] = ('.80', '.85')
+        self.engine.cycle()
+        summary = report(Path(self.temp.name)/'journal.db')['exit_diagnostics_last_24h']['by_phase']
+        self.assertEqual(summary['scan']['statuses'], {'eligible': 1})
+        self.assertEqual(summary['preflight']['statuses'], {'eligible': 1})
+        self.assertEqual(self.sig.orders[2]['action'], 'sell')
+
+    def test_open_orders_and_news_are_not_evaluated_exit_guards(self):
+        self.engine.cycle()
+        self.age_orders()
+        self.sig.open_orders = Mock(return_value=[{'id': 'manual'}])
+        self.engine.cycle()
+        self.sig.open_orders.return_value = []
+        news = Mock()
+        news.drain.return_value = {}
+        news.block_reason.return_value = 'Risk headline'
+        self.engine.news = news
+        self.engine.cycle()
+        summary = report(Path(self.temp.name)/'journal.db')['exit_diagnostics_last_24h']['by_phase']['scan']
+        self.assertEqual(summary['statuses'], {'not_evaluated': 2})
+        self.assertEqual(summary['reasons'], {'open_orders': 1, 'news_pause': 1})
+        self.assertEqual(len(self.sig.orders), 1)
+
+    def test_due_measurement_works_without_reference_feeds_or_new_orders(self):
+        self.engine.cycle()
+        self.journal.db.execute('UPDATE executions SET at=?', (time.time()-3601,))
+        self.journal.db.commit()
+        self.sig.place = Mock(wraps=self.sig.place)
+        self.sig.cancel = Mock(wraps=self.sig.cancel)
+        self.refs.books = Mock(side_effect=APIError('External feed down', status=503, method='GET'))
+        self.engine.cycle()
+        row = self.journal.db.execute('SELECT * FROM markouts WHERE horizon=3600').fetchone()
+        self.assertIsNotNone(row['pnl'])
+        self.sig.place.assert_not_called()
+        self.sig.cancel.assert_not_called()
+
+    def test_observation_failure_is_retried_without_trading_and_stop_is_respected(self):
+        self.engine.cycle()
+        self.journal.db.execute('UPDATE executions SET at=?', (time.time()-3601,))
+        self.journal.db.commit()
+        original = self.sig.book
+        self.sig.book = Mock(side_effect=APIError('503', status=503, method='GET'))
+        self.engine.observe_due()
+        self.assertIsNone(self.journal.db.execute('SELECT * FROM markouts WHERE horizon=3600').fetchone())
+        self.sig.book = Mock(wraps=original)
+        (Path(self.temp.name)/'STOP').touch()
+        self.engine.observe_due()
+        self.sig.book.assert_not_called()
+        (Path(self.temp.name)/'STOP').unlink()
+        self.engine.observe_due()
+        self.assertIsNotNone(self.journal.db.execute('SELECT pnl FROM markouts WHERE horizon=3600').fetchone()[0])
+        self.assertEqual(len(self.sig.orders), 1)
+
+    def test_observation_rate_limit_propagates_to_recovery_loop(self):
+        self.engine.cycle()
+        self.journal.db.execute('UPDATE executions SET at=?', (time.time()-3601,))
+        self.journal.db.commit()
+        self.sig.book = Mock(side_effect=APIError('429', status=429, method='GET', retry_after=30))
+        with self.assertRaises(APIError):
+            self.engine.observe_due()
+
     def test_no_side_sale_closes_owned_no(self):
         self.sig.prices['2'] = ('.85', '.90')
         self.engine.cycle()
@@ -373,3 +520,6 @@ class ActiveTests(unittest.TestCase):
         self.sig.prices['2'] = ('.745', '.75')
         self.engine.cycle()
         self.assertFalse(self.sig.orders)
+        detail = json.loads(self.journal.db.execute("SELECT detail FROM events WHERE kind='decision' ORDER BY at DESC LIMIT 1").fetchone()[0])
+        self.assertEqual(detail['exit_check']['reason'], 'fifo_profit_below_minimum')
+        self.assertFalse(detail['exit_check']['routes']['convergence_take_profit']['fifo_profit_passed'])

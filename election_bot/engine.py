@@ -14,6 +14,8 @@ def validate_config(config):
     validate_news(config)
     execution = config.get('execution', {})
     if execution.get('enabled'):
+        if type(execution.get('priority_scanning', True)) is not bool:
+            raise ValueError('priority_scanning must be boolean')
         if type(execution.get('sell_enabled')) is not bool:
             raise ValueError('sell_enabled must be boolean')
         for field, low, high in [('max_orders_per_cycle', 1, 10),
