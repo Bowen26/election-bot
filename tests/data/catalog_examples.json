@@ -1,0 +1,316 @@
+[
+  {
+    "sig_market_id": "384",
+    "title": "Will the Democratic Party win the Rhode Island Governor?",
+    "status": "candidate",
+    "mapping": {
+      "name": "ri-governor-democratic",
+      "race_key": "2026:governor:RI",
+      "enabled": false,
+      "news_match": {
+        "all": [
+          [
+            "Rhode Island"
+          ],
+          [
+            "Governor",
+            "Governor"
+          ]
+        ],
+        "exclude": []
+      },
+      "sig_market_id": "384",
+      "sig_exchange_id": "1073",
+      "kalshi_ticker": "GOVPARTYRI-26-D",
+      "polymarket_event": "rhode-island-governor-winner-2026",
+      "polymarket_market": "will-the-democrats-win-the-rhode-island-governor-race-in-2026",
+      "kalshi_yes_matches_sig_yes": true,
+      "polymarket_yes_matches_sig_yes": true,
+      "contract_fingerprint": "fb1ca4ec561460db73a8d103d8b33eac732dacea49ee280fea107029968a0153"
+    },
+    "contract": {
+      "sig": {
+        "id": "384",
+        "title": "Will the Democratic Party win the Rhode Island Governor?",
+        "exchange": "1073",
+        "option": "YES",
+        "settlementDate": "2026-11-04T17:00:00.000Z",
+        "resolution_tree": {
+          "node_id": "385",
+          "node_type": "contract",
+          "contract_id": "385",
+          "contract_type": "Election Outcome",
+          "title": "Will the Democratic Party win the Rhode Island Governor?",
+          "settlement_date": "2026-11-04T17:00:00.000Z",
+          "settled_with": null,
+          "contract_details": {
+            "raceId": "76823",
+            "stageId": "119026",
+            "usState": "RI",
+            "raceName": "Governor of Rhode Island",
+            "raceStage": "General",
+            "winnerName": "Democratic Party",
+            "officeLevel": "State",
+            "contractType": "Election Outcome",
+            "electionDate": "2026-11-03",
+            "resolutionType": "Party Winner"
+          }
+        }
+      },
+      "kalshi": {
+        "ticker": "GOVPARTYRI-26-D",
+        "title": "Will the Democratic party win the governorship in Rhode Island",
+        "rules_primary": "If a representative of the Democratic party is inaugurated as the governor of Rhode Island pursuant to the 2026 election, then the market resolves to Yes.",
+        "rules_secondary": "This market is eligible for accelerated determination after a consensus of media organizations project the winner. See full rules for details."
+      },
+      "polymarket": {
+        "id": "629627",
+        "question": "Will the Democrats win the Rhode Island governor race in 2026?",
+        "description": "This market will resolve according to the winner of the 2026 Rhode Island gubernatorial election.\n\nA candidate shall be considered to represent a party in the event that he or she is the nominee of the party in question. Candidates other than the Democratic or Republican nominee (e.g., Greens, Libertarian, independent) may be added at a later date.\n\nCandidates who run as independents will not be encompassed by the \u201cDemocrat\u201d or \u201cRepublican\u201d options regardless of any affiliation they may have with the party.\n\nThe candidates may be named in the contract for the convenience of traders. In the event that any named candidate is replaced as the nominee of their respective party prior to election day, the name in the contract will be updated and the market will resolve based on the replacement nominee of the party.\n\nThe resolution source for this market is the Associated Press, Fox News, and NBC. This market will resolve once all three sources call the race for the same candidate. If all three sources haven\u2019t called the race in this state for the same candidate, this market will resolve based on the official certification.",
+        "conditionId": "0xc65ec2459a79fb749948503161d42e13c4cb8bb0b670f0dd1ce2c71d7950b459"
+      },
+      "orientations": [
+        true,
+        true
+      ],
+      "poly_yes_token": "12963869833838696349134591178892586509546549676681530057691780490969939726649"
+    },
+    "kalshi_status": "active",
+    "poly_active": true
+  },
+  {
+    "sig_market_id": "381",
+    "title": "Will the Democratic Party win the New Hampshire Senate?",
+    "status": "candidate",
+    "mapping": {
+      "name": "nh-senate-democratic",
+      "race_key": "2026:senate:NH",
+      "enabled": false,
+      "news_match": {
+        "all": [
+          [
+            "New Hampshire"
+          ],
+          [
+            "Senate",
+            "Senator"
+          ]
+        ],
+        "exclude": [
+          "state senate"
+        ]
+      },
+      "sig_market_id": "381",
+      "sig_exchange_id": "1070",
+      "kalshi_ticker": "SENATENH-26-D",
+      "polymarket_event": "new-hampshire-senate-election-winner",
+      "polymarket_market": "will-the-democrats-win-the-new-hampshire-senate-race-in-2026",
+      "kalshi_yes_matches_sig_yes": true,
+      "polymarket_yes_matches_sig_yes": true,
+      "contract_fingerprint": "fc750dce8899d6b1cc07485960526279eb72322e4417c274a22d2bf5b16809e4"
+    },
+    "contract": {
+      "sig": {
+        "id": "381",
+        "title": "Will the Democratic Party win the New Hampshire Senate?",
+        "exchange": "1070",
+        "option": "YES",
+        "settlementDate": "2026-11-04T17:00:00.000Z",
+        "resolution_tree": {
+          "node_id": "382",
+          "node_type": "contract",
+          "contract_id": "382",
+          "contract_type": "Election Outcome",
+          "title": "Will the Democratic Party win the New Hampshire Senate?",
+          "settlement_date": "2026-11-04T17:00:00.000Z",
+          "settled_with": null,
+          "contract_details": {
+            "raceId": "62972",
+            "stageId": "98102",
+            "usState": "NH",
+            "raceName": "U.S. Senate New Hampshire",
+            "raceStage": "General",
+            "winnerName": "Democratic Party",
+            "officeLevel": "Federal",
+            "contractType": "Election Outcome",
+            "electionDate": "2026-11-03",
+            "resolutionType": "Party Winner"
+          }
+        }
+      },
+      "kalshi": {
+        "ticker": "SENATENH-26-D",
+        "title": "Will Democratics win the Senate race in New Hampshire?",
+        "rules_primary": "If a representative of the Democratic party is sworn in as a Senator of New Hampshire for the term beginning in 2027, then the market resolves to Yes.",
+        "rules_secondary": "This market is eligible for accelerated determination after a consensus of media organizations project the winner. See full rules for details."
+      },
+      "polymarket": {
+        "id": "630844",
+        "question": "Will the Democrats win the New Hampshire Senate race in 2026?",
+        "description": "This market will resolve according to the winner of the 2026 midterm New Hampshire U.S. Senate election, inclusive of any run-offs.\n\nA candidate shall be considered to represent a party in the event that he or she is the nominee of the party in question. Candidates other than the Democratic or Republican nominee (e.g., Greens, Libertarian, independent) may be added at a later date.\n\nCandidates who run as independents will not be encompassed by the \u201cDemocrat\u201d or \u201cRepublican\u201d options regardless of any affiliation they may have with the party.\n\nThe candidates may be named in the contract for the convenience of traders. In the event that any named candidate is replaced as the nominee of their respective party prior to election day, the name in the contract will be updated and the market will resolve based on the replacement nominee of the party.\n\nThe resolution source for this market is the Associated Press, Fox News, and NBC. This market will resolve once all three sources call the race for the same candidate. If all three sources haven\u2019t called the race in this state for the same candidate, this market will resolve based on the official certification.",
+        "conditionId": "0xfc5c740e4617eb9908ceada7c91bfbe1cd41f172d703ef811d544e60a7a70bb5"
+      },
+      "orientations": [
+        true,
+        true
+      ],
+      "poly_yes_token": "82410058691149830741200014405570918770267839390767234397030380747995715352939"
+    },
+    "kalshi_status": "active",
+    "poly_active": true
+  },
+  {
+    "sig_market_id": "375",
+    "title": "Will the Democratic Party win the NH-01 House race?",
+    "status": "candidate",
+    "mapping": {
+      "name": "nh-01-house-democratic",
+      "race_key": "2026:house:NH-01",
+      "enabled": false,
+      "news_match": {
+        "all": [
+          [
+            "NH-01",
+            "NH-1",
+            "New Hampshire's 1 congressional district"
+          ]
+        ],
+        "exclude": []
+      },
+      "sig_market_id": "375",
+      "sig_exchange_id": "1064",
+      "kalshi_ticker": "HOUSENH1-26-D",
+      "polymarket_event": "nh-01-house-election-winner",
+      "polymarket_market": "will-the-democratic-party-win-the-nh-01-house-seat",
+      "kalshi_yes_matches_sig_yes": true,
+      "polymarket_yes_matches_sig_yes": true,
+      "contract_fingerprint": "bd9de832a417cc5dfae5a4e92862fcbfcb2cb02e679dd75a28c40f6c04afbe80"
+    },
+    "contract": {
+      "sig": {
+        "id": "375",
+        "title": "Will the Democratic Party win the NH-01 House race?",
+        "exchange": "1064",
+        "option": "YES",
+        "settlementDate": "2026-11-04T17:00:00.000Z",
+        "resolution_tree": {
+          "node_id": "376",
+          "node_type": "contract",
+          "contract_id": "376",
+          "contract_type": "Election Outcome",
+          "title": "Will the Democratic Party win the NH-01 House race?",
+          "settlement_date": "2026-11-04T17:00:00.000Z",
+          "settled_with": null,
+          "contract_details": {
+            "raceId": "64482",
+            "stageId": "99791",
+            "usState": "NH",
+            "raceName": "U.S. House New Hampshire District 1",
+            "raceStage": "General",
+            "winnerName": "Democratic Party",
+            "officeLevel": "Federal",
+            "contractType": "Election Outcome",
+            "electionDate": "2026-11-03",
+            "resolutionType": "Party Winner"
+          }
+        }
+      },
+      "kalshi": {
+        "ticker": "HOUSENH1-26-D",
+        "title": "Will a Democrat win the House race for NH-1?",
+        "rules_primary": "If the House member sworn in for NH-01 for the term beginning in 2027 is a member of the Democratic Party, then the market resolves to Yes.",
+        "rules_secondary": "This market is eligible for accelerated determination after a consensus of media organizations project the winner. See full rules for details."
+      },
+      "polymarket": {
+        "id": "942910",
+        "question": "Will the Democratic Party win the NH-01 House seat?",
+        "description": "This market will resolve according to the party of the candidate who wins the NH-01 congressional district seat in the U.S. House of Representatives in the 2026 midterm elections. The midterm elections will take place on November 3, 2026.\n\n\u200b\u200bA candidate's party will be determined by their ballot-listed or otherwise identifiable affiliation with that party at the time all of the 2026 House elections are conclusively called by this market's resolution sources. A candidate without a ballot-listed affiliation to either the Democrat or Republican parties will be considered a member of one of these parties based on the party with which they most recently expressed their intent to caucus at the time all of the House elections are conclusively called by this market's resolution sources.\n\nThis market will resolve based on the result of the election as indicated by a consensus of credible reporting. If there is ambiguity, this market will resolve based solely on the official results as reported by the United States government, specifically the Federal Election Commission (https://www.fec.gov/).",
+        "conditionId": "0x4460b4d5604834b9579c7b001b19a3faa8441acb6b94b0c35067cf1aaa22d682"
+      },
+      "orientations": [
+        true,
+        true
+      ],
+      "poly_yes_token": "15841973896294397863780283211777886833063131427675236235397936182214462263761"
+    },
+    "kalshi_status": "active",
+    "poly_active": true
+  },
+  {
+    "sig_market_id": "344",
+    "title": "Will the Democratic Party win the VA-05 House race?",
+    "status": "candidate",
+    "mapping": {
+      "name": "va-05-house-democratic",
+      "race_key": "2026:house:VA-05",
+      "enabled": false,
+      "news_match": {
+        "all": [
+          [
+            "VA-05",
+            "VA-5",
+            "Virginia's 5 congressional district"
+          ]
+        ],
+        "exclude": []
+      },
+      "sig_market_id": "344",
+      "sig_exchange_id": "1033",
+      "kalshi_ticker": "KXHOUSERACE-VA05-26-D",
+      "polymarket_event": "va-05-house-election-winner",
+      "polymarket_market": "will-the-democratic-party-win-the-va-05-house-seat",
+      "kalshi_yes_matches_sig_yes": true,
+      "polymarket_yes_matches_sig_yes": true,
+      "contract_fingerprint": "8510b9d45e886ea660cab857ec52ba43ff11465871da97f309c564aa45634c5b"
+    },
+    "contract": {
+      "sig": {
+        "id": "344",
+        "title": "Will the Democratic Party win the VA-05 House race?",
+        "exchange": "1033",
+        "option": "YES",
+        "settlementDate": "2026-11-04T17:00:00.000Z",
+        "resolution_tree": {
+          "node_id": "345",
+          "node_type": "contract",
+          "contract_id": "345",
+          "contract_type": "Election Outcome",
+          "title": "Will the Democratic Party win the VA-05 House race?",
+          "settlement_date": "2026-11-04T17:00:00.000Z",
+          "settled_with": null,
+          "contract_details": {
+            "raceId": "64651",
+            "stageId": "99959",
+            "usState": "VA",
+            "raceName": "U.S. House Virginia District 5",
+            "raceStage": "General",
+            "winnerName": "Democratic Party",
+            "officeLevel": "Federal",
+            "contractType": "Election Outcome",
+            "electionDate": "2026-11-03",
+            "resolutionType": "Party Winner"
+          }
+        }
+      },
+      "kalshi": {
+        "ticker": "KXHOUSERACE-VA05-26-D",
+        "title": "Will Democratic win the House race for VA-05?",
+        "rules_primary": "If the House member sworn in for VA-05 for the term beginning in 2027 is a member of the Democratic Party, then the market resolves to Yes.",
+        "rules_secondary": "This market is eligible for accelerated determination after a consensus of media organizations project the winner. See full rules for details."
+      },
+      "polymarket": {
+        "id": "1285080",
+        "question": "Will the Democratic Party win the VA-05 House seat?",
+        "description": "This market will resolve according to the party of the candidate who wins the VA-05 congressional district seat in the U.S. House of Representatives in the 2026 midterm elections. The midterm elections will take place on November 3, 2026.\n\n\u200bA candidate's party will be determined by their ballot-listed or otherwise identifiable affiliation with that party at the time all of the 2026 House elections are conclusively called by this market's resolution sources. A candidate without a ballot-listed affiliation to either the Democrat or Republican parties will be considered a member of one of these parties based on the party with which they most recently expressed their intent to caucus at the time all of the House elections are conclusively called by this market's resolution sources.\n\nThis market will resolve based on the result of the election as indicated by a consensus of credible reporting. If there is ambiguity, this market will resolve based solely on the official results as reported by the United States government, specifically the Federal Election Commission (https://www.fec.gov/).",
+        "conditionId": "0xcef8e45eaf09b568ff3e7672dc656707792900b4ba2f0ffaf6b0388819b0dab8"
+      },
+      "orientations": [
+        true,
+        true
+      ],
+      "poly_yes_token": "30424541292784877350495001354252975055952568624850695789713995653053526735723"
+    },
+    "kalshi_status": "active",
+    "poly_active": true
+  }
+]

@@ -1,0 +1,97 @@
+{
+  "tournament_slug": "REPLACE_WITH_SIG_TOURNAMENT_SLUG",
+  "tournament_id": "REPLACE_WITH_SIG_TOURNAMENT_UUID",
+  "poll_seconds": 20,
+  "scan_batch_size": 8,
+  "cooldown_seconds": 120,
+  "order_lifetime_seconds": 15,
+  "news": {
+    "enabled": true,
+    "poll_seconds": 60,
+    "max_article_age_seconds": 21600,
+    "pause_seconds": 900,
+    "max_feed_silence_seconds": 300,
+    "sources": [
+      {
+        "name": "NPR Politics",
+        "url": "https://feeds.npr.org/1014/rss.xml",
+        "article_hosts": [
+          "www.npr.org",
+          "npr.org"
+        ],
+        "pause_on_risk": true
+      },
+      {
+        "name": "PBS Politics",
+        "url": "https://www.pbs.org/newshour/feeds/rss/politics",
+        "article_hosts": [
+          "www.pbs.org",
+          "pbs.org"
+        ],
+        "pause_on_risk": true
+      },
+      {
+        "name": "NHPR",
+        "url": "https://www.nhpr.org/latest-from-nhpr-rss.rss",
+        "article_hosts": [
+          "www.nhpr.org",
+          "nhpr.org"
+        ],
+        "pause_on_risk": true
+      }
+    ]
+  },
+  "limits": {
+    "per_order": "25",
+    "per_market": "100",
+    "total": "500",
+    "daily": "200"
+  },
+  "strategy": {
+    "minimum_edge": "0.05",
+    "cost_buffer_per_share": "0.01",
+    "max_reference_spread": "0.08",
+    "max_reference_disagreement": "0.08",
+    "max_age_seconds": 15,
+    "min_reference_depth": "20",
+    "max_shares_per_order": 100
+  },
+  "markets": [
+    {
+      "name": "nh-senate-democratic",
+      "news_match": {
+        "all": [
+          [
+            "New Hampshire",
+            "N.H."
+          ],
+          [
+            "Senate",
+            "Senator"
+          ]
+        ],
+        "exclude": [
+          "state senate"
+        ]
+      },
+      "enabled": false,
+      "sig_market_id": "REPLACE_WITH_MARKET_ID",
+      "sig_exchange_id": "REPLACE_WITH_EXCHANGE_ID",
+      "kalshi_ticker": "SENATENH-26-D",
+      "polymarket_event": "new-hampshire-senate-election-winner",
+      "polymarket_market": "will-the-democrats-win-the-new-hampshire-senate-race-in-2026",
+      "kalshi_yes_matches_sig_yes": true,
+      "polymarket_yes_matches_sig_yes": true,
+      "contract_fingerprint": null
+    }
+  ],
+  "execution": {
+    "enabled": false,
+    "sell_enabled": true,
+    "max_orders_per_cycle": 4,
+    "metadata_cache_seconds": 900,
+    "batch_pause_seconds": 1,
+    "exit_edge": "0.02",
+    "take_profit_min": "0.02"
+  }
+}

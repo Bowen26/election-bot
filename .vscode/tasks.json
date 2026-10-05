@@ -1,0 +1,8 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {"label": "News monitor status", "type": "process", "command": "python3", "args": ["-m", "election_bot", "news", "--status"], "options": {"cwd": "${workspaceFolder}"}, "problemMatcher": []},
+    {"label": "Run bot tests", "type": "process", "command": "python3", "args": ["-m", "unittest", "discover", "-s", "tests", "-v"], "options": {"cwd": "${workspaceFolder}"}, "problemMatcher": []},
+    {"label": "Stop trading bot", "type": "process", "command": "python3", "args": ["-m", "election_bot", "stop"], "options": {"cwd": "${workspaceFolder}"}, "problemMatcher": []}
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {"name": "Offline demo", "type": "debugpy", "request": "launch", "module": "election_bot", "cwd": "${workspaceFolder}", "args": ["demo"], "console": "integratedTerminal"},
+    {"name": "Paper trading", "type": "debugpy", "request": "launch", "module": "election_bot", "cwd": "${workspaceFolder}", "args": ["run"], "console": "integratedTerminal"},
+    {"name": "LIVE SIG competition trading", "type": "debugpy", "request": "launch", "module": "election_bot", "cwd": "${workspaceFolder}", "args": ["run", "--live"], "console": "integratedTerminal"}
+  ]
+}

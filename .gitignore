@@ -1,0 +1,14 @@
+.env
+.runtime/
+config.json
+__pycache__/
+*.pyc
+.env.*
+!.env.example
+.DS_Store
+.venv/
+venv/
+*.sqlite3*
+*.sqlite*
+*.db
+*.log
