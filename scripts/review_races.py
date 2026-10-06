@@ -7,6 +7,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from election_bot.regions import region_for_state
 from election_bot.__main__ import key
 from election_bot.clients import References, Sig, contract_record, fingerprint
 from election_bot.strategy import choose
@@ -35,6 +36,7 @@ def main():
             raise ValueError('Missing or ambiguous external party contract: ' + state)
         mapping = {'name': code.lower()+'-senate-democratic', 'enabled': False,
                    'office': 'senate', 'exposure_sign': 1,
+                   'state_code': code, 'region': region_for_state(code),
                    'news_match': {'all': [[state], ['Senate', 'Senator']], 'exclude': ['state senate']},
                    'sig_market_id': str(matches[0]['id']),
                    'sig_exchange_id': str(matches[0]['exchanges'][0]['id']),

@@ -37,6 +37,6 @@ python3 -m election_bot news --clear-dispute 123 \
 
 This records a timestamp and review note, and removes only the timed pause belonging to that same article/mapping. Other disputes, newer pauses, feed-health checks and every existing execution guard remain in force. It does not submit orders or start the bot. The next scan can trade only if all remaining checks pass. Review state is shared by paper and live news readers.
 
-## Remaining P1 work
+## Follow-up status
 
-Per-office directional limits and zero-cost recovery of unfilled paper reservations were completed in the preceding batch. Region-level limits remain a separate change requiring an explicit region grouping and limits; this update does not choose or enable them. P2 strategy analysis and threshold/sizing experiments are also separate.
+Per-office directional limits and zero-cost recovery of unfilled paper reservations were completed in the preceding batch. Regional limits are now implemented with the four Census regions and a user-selected 2,500 net-share cap per region; see [portfolio controls](portfolio-controls.md). Entry-price/gap reports are available in [entry analysis](entry-analysis.md). P2 threshold/sizing experiments remain separate.

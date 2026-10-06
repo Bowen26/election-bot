@@ -7,6 +7,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from election_bot.regions import region_for_state
 from election_bot.__main__ import key, save_json
 from election_bot.clients import References, Sig, contract_record, fingerprint, APIError
 from election_bot.catalog import STATES
@@ -84,6 +85,7 @@ def main():
             mapping = {'name': (code + '-' + (number + '-' if district else '') + office + '-democratic').lower(),
                 'race_key': '2026:' + office.lower() + ':' + (label if district else code),
                 'office': office.lower(), 'exposure_sign': 1,
+                'state_code': code, 'region': region_for_state(code),
                 'enabled': False, 'news_match': news, 'sig_market_id': str(market['id']),
                 'sig_exchange_id': str(market['exchanges'][0]['id']),
                 'kalshi_ticker': ticker, 'polymarket_event': event['slug'], 'polymarket_market': pm[0]['slug'],

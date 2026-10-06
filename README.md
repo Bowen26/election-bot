@@ -70,6 +70,7 @@ For each enabled race, the bot normalizes both external books to the SIG YES out
 | Total risk capital | 25,000 SUSQies |
 | Net directional shares, total | 5,000 shares |
 | Net directional shares, per office | 2,500 shares |
+| Net directional shares, per Census region | 2,500 shares |
 | Cumulative net realized-loss stop | 2,500 SUSQies (10% of total risk capital) |
 | Gross daily buy spending, UTC | 5,000 SUSQies |
 | Maximum shares/order | 100 |
@@ -94,7 +95,11 @@ The additional portfolio controls size both buys and sales against signed exposu
 
 Complete fill-history pagination now anchors new measurements to the last fill. Persistent disputed-result flags identify held positions needing review and remain until explicitly cleared. See [accounting and dispute handling](docs/accounting-and-disputes.md) for behavior, diagnostics and review commands.
 
+Regional exposure checks use the four [U.S. Census regions](https://www2.census.gov/geo/pdfs/maps-data/maps/reference/us_regdiv.pdf), with an explicit state and region for every enabled race. Total, office and regional caps apply together to buys, sales and possible pending fills. Geographic grouping does not make election outcomes independent.
+
 ## Performance and diagnostics
+
+Run `python3 -m election_bot analysis` for entry-price and entry-gap tables at five and fifteen minutes. Add `--json` for coverage, sampling delays, race/day counts and exploratory uncertainty intervals; use `--paper` for the simulation journal. Old trades without an exact order-linked reference remain in the unknown-gap bucket. See [entry analysis](docs/entry-analysis.md) for definitions and limitations.
 
 For a focused read-only report on stale feeds and unsold positions, run `python3 -m election_bot diagnostics` (or add `--paper`). No SIG key or network connection is needed to read this report. It uses newly recorded events; older generic skip messages cannot be reliably attributed to a venue.
 
@@ -115,6 +120,12 @@ At the beginning of each active execution cycle, a separate observation pass rea
 The allowed delay after each target is 60 seconds, 2 minutes, 3 minutes, 15 minutes and 6 hours respectively. `performance` reports coverage, missing and pending observations, positive-result percentage, P&L per share, return on entry cost, and average/maximum sampling delay, both overall and by market/outcome. Expired windows remain missing even if a later quote becomes available. Low coverage can bias measured results toward liquid markets; it is not evidence that the missing buys performed well.
 
 The shorter horizons apply only to buys filled after the updated bot first starts; older 1-hour/24-hour observations remain intact. The migration is additive and does not reset orders, accounting or budgets. Reporting itself stays read-only. These are hypothetical outcomes even if the actual position was sold earlier; do not add them across horizons or treat repeated buys in one race as independent evidence. This is forward monitoring, not a backtest or proof of predictive advantage. Realized P&L still uses FIFO bot costs and configured buffers, not verified exchange fees. Trading thresholds, order sizing and limits are unchanged by this measurement upgrade.
+
+## Reference leadership and shadow entries
+
+`python3 -m election_bot leadership` reports whether reference gaps and recent moves precede SIG price changes, with explicit missing observations at 5 and 15 minutes. Add `--json` for day/race breakdowns and paired comparisons, `--hours 24` for a shorter lookback, or `--paper` for the paper journal. It reads local data only.
+
+After restarting the active bot, it also records prospective entry proposals using the current conservative reference, Kalshi's bid and Polymarket's bid, while retaining common liquidity/risk checks. These records cannot submit orders or change live decisions. Their hypothetical outcomes assume displayed fills, use both buffers and require sufficient future SIG depth; they are not realized returns or an independent portfolio simulation. See [the methodology and limitations](docs/reference-leadership.md). Existing snapshots support the leadership report; historical shadow decisions are not backfilled.
 
 ## Full competition coverage
 

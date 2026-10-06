@@ -90,6 +90,13 @@ def main():
     performance.add_argument('--paper', action='store_true')
     diagnostics = sub.add_parser('diagnostics', help='Read venue freshness and exit blockers from the local journal')
     diagnostics.add_argument('--paper', action='store_true')
+    analysis = sub.add_parser('analysis', help='Read entry-price and entry-gap markout reports; no network')
+    analysis.add_argument('--paper', action='store_true')
+    analysis.add_argument('--json', action='store_true', help='Include full statistics and uncertainty details')
+    leadership = sub.add_parser('leadership', help='Read reference leadership and prospective shadow comparisons; no network')
+    leadership.add_argument('--paper', action='store_true')
+    leadership.add_argument('--json', action='store_true')
+    leadership.add_argument('--hours', type=float, default=48, help='Lookback in hours, up to 720 (default: 48)')
     args = parser.parse_args()
     if args.command == 'demo':
         from .demo import run_demo
@@ -110,7 +117,23 @@ def main():
                 os.fsync(handle.fileno())
         print('Local setup saved. Next: discover --tournaments, then edit ' + str(args.config))
         return
+    if args.command == 'leadership':
+        from .leadership import report, format_report
+        result = report(RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3'), hours=args.hours)
+        if args.json:
+            output(result)
+        else:
+            print(format_report(result))
+        return
     RUNTIME.mkdir(exist_ok=True, mode=0o700)
+    if args.command == 'analysis':
+        from .entry_analysis import report, format_report
+        result = report(RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3'))
+        if args.json:
+            output(result)
+        else:
+            print(format_report(result))
+        return
     if args.command in ('performance', 'diagnostics'):
         from .performance import report
         result = report(RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3'))
@@ -160,6 +183,7 @@ def main():
         report = json.loads(report_path.read_text()) if report_path.exists() else {}
         output({'configured_races': len(enabled),
                 'by_office': dict(Counter(m.get('race_key', 'unknown:unknown').split(':')[1] for m in enabled)),
+                'by_region': dict(Counter(m.get('region', 'unassigned') for m in enabled)),
                 'limits': config['limits'], 'scan_batch_size': config.get('scan_batch_size', 8),
                 'execution': config.get('execution', {'enabled': False}),
                 'budget_mode': 'open_cost_plus_realized_losses' if config.get('execution', {}).get('enabled') else 'cumulative_purchases',

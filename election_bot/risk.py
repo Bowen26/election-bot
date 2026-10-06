@@ -3,19 +3,21 @@ import json
 from decimal import InvalidOperation
 
 from .strategy import D
+from .regions import CENSUS_REGIONS, mapping_region
 
 OFFICES = ('house', 'senate', 'governor')
 CAP_FIELDS = ('net_shares_total', 'net_shares_per_office')
+REGION_FIELD = 'net_shares_per_region'
 LOSS_FIELD = 'realized_loss_stop_fraction'
 
 
 def validate_risk_config(config):
     limits = config['limits']
-    configured = any(name in limits for name in CAP_FIELDS + (LOSS_FIELD,))
+    configured = any(name in limits for name in CAP_FIELDS + (REGION_FIELD, LOSS_FIELD))
     if configured and not config.get('execution', {}).get('enabled'):
         raise ValueError('Portfolio risk controls require execution.enabled=true (ActiveEngine)')
-    if any(name in limits for name in CAP_FIELDS):
-        for name in CAP_FIELDS:
+    if any(name in limits for name in CAP_FIELDS + (REGION_FIELD,)):
+        for name in CAP_FIELDS + ((REGION_FIELD,) if REGION_FIELD in limits else ()):
             if name not in limits:
                 raise ValueError('Directional limits require both ' + ' and '.join(CAP_FIELDS))
             try:
@@ -26,6 +28,8 @@ def validate_risk_config(config):
                 raise ValueError(name + ' must be a positive integer share count')
         if D(limits['net_shares_per_office']) > D(limits['net_shares_total']):
             raise ValueError('net_shares_per_office cannot exceed net_shares_total')
+        if REGION_FIELD in limits and D(limits[REGION_FIELD]) > D(limits['net_shares_total']):
+            raise ValueError('net_shares_per_region cannot exceed net_shares_total')
         seen = set()
         for mapping in config.get('markets', []):
             if isinstance(mapping, dict) and mapping.get('sig_exchange_id') is not None:
@@ -36,6 +40,8 @@ def validate_risk_config(config):
             if not isinstance(mapping, dict) or not mapping.get('enabled'):
                 continue  # Generic mapping validation reports malformed records.
             _metadata(mapping)
+            if REGION_FIELD in limits:
+                mapping_region(mapping)
     if LOSS_FIELD in limits:
         try:
             fraction = D(limits[LOSS_FIELD]) if not isinstance(limits[LOSS_FIELD], bool) else D(0)
@@ -62,9 +68,12 @@ class Exposure:
     def __init__(self, ledger, config):
         self.enabled = 'net_shares_total' in config['limits']
         self.limits = config['limits']
+        self.regional_enabled = REGION_FIELD in self.limits
         self.mappings = {m['sig_exchange_id']: m for m in config['markets']
                          if isinstance(m, dict) and 'sig_exchange_id' in m}
         self.net = {'total': D(0), **{office: D(0) for office in OFFICES}}
+        if self.regional_enabled:
+            self.net.update({'region:' + region: D(0) for region in CENSUS_REGIONS})
         self.bounds = {group: [D(0), D(0)] for group in self.net}
         if not self.enabled:
             return
@@ -72,8 +81,8 @@ class Exposure:
         for (exchange, side), value in holdings.items():
             office, sign = self.metadata(exchange)
             delta = value['quantity'] * sign * self.direction('buy', side)
-            self.net['total'] += delta
-            self.net[office] += delta
+            for group in self.groups(exchange):
+                self.net[group] += delta
         self.bounds = {group: [net, net] for group, net in self.net.items()}
         for row in ledger.journal.pending():
             payload = json.loads(row['payload'])
@@ -83,15 +92,23 @@ class Exposure:
                 raise RuntimeError('Invalid pending exposure quantity; reconcile before trading')
             delta = quantity * sign * self.direction(payload['action'], payload['side'])
             # Reserve the entire unknown fill interval, including pending sales.
-            for group in ('total', office):
+            for group in self.groups(payload['exchangeId']):
                 self.bounds[group][0] += min(D(0), delta)
                 self.bounds[group][1] += max(D(0), delta)
 
     def metadata(self, exchange):
         try:
-            return _metadata(self.mappings[exchange])
+            mapping = self.mappings[exchange]
+            if self.regional_enabled:
+                mapping_region(mapping)
+            return _metadata(mapping)
         except (KeyError, ValueError) as error:
             raise RuntimeError('Unmapped portfolio exposure for exchange ' + str(exchange)) from error
+
+    def groups(self, exchange):
+        office, _ = self.metadata(exchange)
+        return ('total', office) + (('region:' + mapping_region(self.mappings[exchange]),)
+                                    if self.regional_enabled else ())
 
     @staticmethod
     def direction(action, side):
@@ -106,6 +123,8 @@ class Exposure:
         direction = sign * self.direction(action, side)
         caps = {'total': D(self.limits['net_shares_total']),
                 office: D(self.limits['net_shares_per_office'])}
+        if self.regional_enabled:
+            caps['region:' + mapping_region(self.mappings[exchange])] = D(self.limits[REGION_FIELD])
         rooms = []
         for group, cap in caps.items():
             low, high = self.bounds[group]
@@ -117,7 +136,10 @@ class Exposure:
         return {'enabled': self.enabled, 'net_shares': self.net if self.enabled else None,
                 'possible_net_shares_including_pending': self.bounds if self.enabled else None,
                 'total_cap': self.limits.get('net_shares_total'),
-                'per_office_cap': self.limits.get('net_shares_per_office')}
+                'per_office_cap': self.limits.get('net_shares_per_office'),
+                'per_region_cap': self.limits.get(REGION_FIELD),
+                'net_shares_by_region': {region: self.net['region:' + region] for region in CENSUS_REGIONS}
+                    if self.enabled and self.regional_enabled else None}
 
 
 def verify_account_inventory(ledger, positions):

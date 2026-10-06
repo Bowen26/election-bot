@@ -6,7 +6,7 @@ import tempfile
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import test_active
 from election_bot.active_engine import ActiveEngine
@@ -347,6 +347,31 @@ class RiskIntegrationTests(unittest.TestCase):
         signal = json.loads(self.journal.db.execute("SELECT detail FROM events WHERE kind='signal'").fetchone()[0])
         self.assertEqual(signal['snapshot_id'], snapshots[1]['snapshot_id'])
         self.assertEqual(signal['order_key'], self.sig.orders[1]['idempotencyKey'])
+
+    def test_shadow_logs_once_without_changing_order_or_network_calls(self):
+        original = self.refs.books
+        with patch.object(self.refs, 'books', wraps=original) as books:
+            self.engine.cycle()
+            self.assertEqual(books.call_count, 2)  # scan + existing preflight only
+        shadows = [json.loads(r['detail']) for r in self.journal.db.execute(
+            "SELECT detail FROM events WHERE kind='shadow_decision'")]
+        self.assertEqual(len(shadows), 1)
+        self.assertEqual(len(self.sig.orders), 1)
+        baseline = shadows[0]['decisions'][0]['candidate']
+        self.assertEqual(baseline['quantity'], self.sig.orders[1]['quantity'])
+        self.assertEqual(D(baseline['price']), D(self.sig.orders[1]['price']))
+        self.assertEqual(baseline['side'], self.sig.orders[1]['side'])
+        self.assertFalse(self.journal.pending())
+        self.assertEqual(self.journal.db.execute('SELECT COUNT(*) FROM orders').fetchone()[0], 1)
+
+    def test_shadow_quote_aging_does_not_change_live_choice(self):
+        with patch('election_bot.active_engine.shadow_decisions', side_effect=ValueError('quote aged out')):
+            self.engine.cycle()
+        self.assertEqual(len(self.sig.orders), 1)
+        shadow = json.loads(self.journal.db.execute(
+            "SELECT detail FROM events WHERE kind='shadow_decision'").fetchone()[0])
+        self.assertEqual(shadow['status'], 'unavailable')
+        self.assertFalse(self.journal.pending())
 
     def test_invalid_quote_is_logged_as_invalid_not_refreshed(self):
         book, refs = self.sig.book('2'), self.refs.books({}, None)

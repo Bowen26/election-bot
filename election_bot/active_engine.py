@@ -9,6 +9,7 @@ from .clients import APIError, contract_record, fingerprint, iso_time
 from .engine import Engine
 from .ledger import Ledger
 from .scanner import ScanInterest
+from .shadow import decisions as shadow_decisions
 from .risk import Exposure, LOSS_FIELD, verify_account_inventory
 from .strategy import BookValidationError, D, choose, choose_exit
 
@@ -235,6 +236,17 @@ class ActiveEngine(Engine):
             'snapshot_id': self.latest_snapshot_id, 'exposure': exposure.summary(),
             'action': signal.action if signal else None,
             'reason': signal.reason if signal else 'no_eligible_signal'})
+        if phase == 'scan':
+            try:
+                shadow = shadow_decisions(book, refs, self.config['strategy'],
+                    self.available(exchange, account), held, side_limits, exit_signal is not None)
+            except ValueError as error:
+                # A quote can age out during this extra calculation. Measurement
+                # failure must not change the already selected live decision.
+                shadow = {'version': 1, 'experiment': 'reference_bid_v1',
+                          'status': 'unavailable', 'reason': str(error)}
+            self.journal.event('shadow_decision', {**shadow, 'exchange': exchange,
+                'snapshot_id': self.latest_snapshot_id, 'phase': phase})
         return signal
 
     def quote_diagnostics(self, exchange, book, refs, phase, error=None):

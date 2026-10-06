@@ -84,7 +84,9 @@
       "polymarket_yes_matches_sig_yes": true,
       "contract_fingerprint": null,
       "office": "senate",
-      "exposure_sign": 1
+      "exposure_sign": 1,
+      "state_code": "NH",
+      "region": "northeast"
     }
   ],
   "execution": {
