@@ -43,6 +43,7 @@ class Journal:
           CREATE TABLE IF NOT EXISTS events (
             at REAL NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL);
           CREATE INDEX IF NOT EXISTS events_at ON events(at);
+          CREATE INDEX IF NOT EXISTS orders_market_created ON orders(market,created);
         ''')
         row = self.db.execute('SELECT binding FROM identity').fetchone()
         if row and row['binding'] != binding:
@@ -59,10 +60,15 @@ class Journal:
             self.db.execute('INSERT INTO events VALUES (?,?,?)',
                             (time.time(), kind, json.dumps(detail, default=str, allow_nan=False)))
 
-    def reserve(self, payload, amount):
+    def reserve(self, payload, amount, guard=None):
+        if self.db.in_transaction:
+            raise RuntimeError("Reservation requires its own transaction")
         with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
             if self.pending():
                 raise RuntimeError("Unresolved order blocks new submissions")
+            if guard is not None:
+                guard()
             self.db.execute('INSERT INTO orders VALUES (?,?,?,?,?,?,?,NULL)',
                             (payload['idempotencyKey'], payload['exchangeId'], str(amount),
                              datetime.now(timezone.utc).date().isoformat(), time.time(),

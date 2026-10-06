@@ -10,8 +10,14 @@ from .engine import Engine
 from .ledger import Ledger
 from .scanner import ScanInterest
 from .shadow import decisions as shadow_decisions
+from .exit_study import checked_exit, experiment as exit_experiment
 from .risk import Exposure, LOSS_FIELD, verify_account_inventory
-from .strategy import BookValidationError, D, choose, choose_exit
+from .race_controls import RaceGroups
+from .strategy import BookValidationError, D, choose
+
+
+class ReservationRejected(ValueError):
+    pass
 
 
 class InventoryValidationError(ValueError):
@@ -24,6 +30,8 @@ class ActiveEngine(Engine):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.ledger = Ledger(self.journal)
+        self.races = RaceGroups(self.config, self.journal.db)
+        self.races.bind(self.journal.db)
         self.cache = {}
         self.execution = self.config['execution']
         self.scan_interest = ScanInterest()
@@ -90,7 +98,7 @@ class ActiveEngine(Engine):
         self.ledger.record(payload, quantity, price, self.config['strategy']['cost_buffer_per_share'], at)
         self.report('order_closed', {'order_id': oid, 'exchange': payload['exchangeId'],
                     'action': payload['action'], 'side': payload['side'], 'filled': quantity,
-                    'average_fill_price': price, **self.ledger.summary()})
+                    'average_fill_price': price, **self.portfolio_summary()})
         self.check_loss_stop()
 
     def sync_history(self):
@@ -153,9 +161,40 @@ class ActiveEngine(Engine):
             # Paper inventory must consume paper cash without altering the real account.
             cash -= self.ledger.committed()
         return max(D(0), min(D(limits['per_order']), cash,
-            D(limits['per_market']) - self.ledger.committed(exchange),
+            D(limits['per_market']) - self.races.committed(self.ledger, exchange),
             D(limits['total']) - self.ledger.committed(),
             D(limits['daily']) - self.journal.used(today=True)))
+
+    def portfolio_summary(self):
+        return {**self.ledger.summary(), **self.races.summary(self.ledger)}
+
+    def reserve_order(self, payload, reserve, account, positions):
+        """Recheck local limits under the same write lock as the reservation."""
+        def guard():
+            self.ledger.inventory(refresh=True)  # Include any newly committed execution.
+            self.check_account(account)
+            if self.ledger.missing():
+                raise RuntimeError('Unimported executions block reservation')
+            exchange = payload['exchangeId']
+            if time.time()-self.races.last_order(self.journal, exchange) < self.config['cooldown_seconds']:
+                raise ReservationRejected('Race cooldown changed before reservation')
+            expected = D(payload['quantity']) * (D(payload['price']) + D(self.config['strategy']['cost_buffer_per_share']))
+            if D(reserve) != expected:
+                raise RuntimeError('Reservation amount disagrees with order')
+            if payload['action'] == 'buy' and reserve > self.available(exchange, account):
+                raise ReservationRejected('Coin limits changed before reservation')
+            if payload['action'] == 'sell':
+                self.ledger.sale_basis(exchange, payload['side'], payload['quantity'])
+            exposure = Exposure(self.ledger, self.config)
+            if exposure.enabled:
+                if self.live:
+                    verify_account_inventory(self.ledger, positions)
+                if D(payload['quantity']) > exposure.headroom(exchange, payload['action'], payload['side']):
+                    raise ReservationRejected('Exposure changed before reservation')
+            loss = self.loss_status()
+            if loss['realized_loss_stop_coins'] is not None and loss['net_realized_loss'] >= loss['realized_loss_stop_coins']:
+                raise RuntimeError('Realized loss limit reached before reservation')
+        self.journal.reserve(payload, reserve, guard=guard)
 
     def loss_status(self):
         _, realized = self.ledger.inventory()
@@ -214,28 +253,28 @@ class ActiveEngine(Engine):
         exit_check = {'status': 'blocked' if held else 'not_applicable',
                       'reason': 'selling_disabled' if held else 'no_position'}
         entry = choose(book, refs, self.config['strategy'], self.available(exchange, account), diagnostics, side_limits)
-        exit_signal = choose_exit(book, refs, self.config['strategy'], self.execution, held, cost,
-                                  self.config['limits']['per_order'], exit_check, exit_limit) if self.execution['sell_enabled'] else None
-        if exit_signal and exit_signal.reason == 'convergence_take_profit':
-            basis = self.ledger.sale_basis(exchange, exit_signal.side, exit_signal.quantity)
-            net = exit_signal.price - D(self.config['strategy']['cost_buffer_per_share'])
-            route = exit_check['routes']['convergence_take_profit']
-            route.update(fifo_cost_per_share=str(basis/exit_signal.quantity),
-                         net_profit_per_share_fifo=str(net-basis/exit_signal.quantity),
-                         fifo_profit_passed=net-basis/exit_signal.quantity >= D(self.execution['take_profit_min']))
-            if net - basis / exit_signal.quantity < D(self.execution['take_profit_min']):
-                exit_check.update(status='blocked', reason='fifo_profit_below_minimum')
-                exit_signal = None  # An average-cost gain need not be a gain on the FIFO shares sold.
+        sale_basis = lambda side, quantity: self.ledger.sale_basis(exchange, side, quantity)
+        exit_signal = checked_exit(book, refs, self.config['strategy'], self.execution, held, cost,
+                                  self.config['limits']['per_order'], sale_basis, exit_check, exit_limit) if self.execution['sell_enabled'] else None
         if entry and held and ((held < 0) != (entry.side == 'no')):
             entry = None  # Never use a complement buy to close or flip inventory.
             diagnostics.append({'reason': 'opposite_inventory'})
         signal = exit_signal or entry
         self.scan_interest.observe(mapping['name'], diagnostics, refs, self.config['strategy'], held)
-        self.report('decision', {'exchange': exchange, 'held': held, 'available': self.available(exchange, account),
+        self.report('decision', {'exchange': exchange, 'race_key': self.races.race(exchange), 'held': held, 'available': self.available(exchange, account),
             'checks': diagnostics, 'exit_check': exit_check, 'phase': phase,
             'snapshot_id': self.latest_snapshot_id, 'exposure': exposure.summary(),
             'action': signal.action if signal else None,
             'reason': signal.reason if signal else 'no_eligible_signal'})
+        if phase == 'scan' and held:
+            try:
+                study = exit_experiment(book, refs, self.config['strategy'], self.execution, held, cost,
+                    self.config['limits']['per_order'], sale_basis, exit_signal, exit_check, exit_limit)
+            except ValueError as error:
+                study = {'version': 1, 'experiment': 'exit_depth_v1', 'simulation_only': True,
+                         'status': 'unavailable', 'reason': str(error)}
+            self.journal.event('exit_shadow', {**study, 'exchange': exchange,
+                'snapshot_id': self.latest_snapshot_id, 'phase': phase})
         if phase == 'scan':
             try:
                 shadow = shadow_decisions(book, refs, self.config['strategy'],
@@ -294,9 +333,8 @@ class ActiveEngine(Engine):
         holdings, _ = self.ledger.inventory()
         exchanges = {ex for (ex, side), values in holdings.items() if values['quantity']}
         owned = {m['name'] for m in self.markets if m['sig_exchange_id'] in exchanges}
-        last_orders = {r['market']: r['last'] for r in self.journal.db.execute(
-            'SELECT market,MAX(created) AS last FROM orders GROUP BY market')}
-        not_before = {m['name']: (last_orders.get(m['sig_exchange_id']) or 0) + self.config['cooldown_seconds']
+        last_orders = self.races.last_orders(self.journal)
+        not_before = {m['name']: last_orders.get(self.races.race(m['sig_exchange_id']), 0) + self.config['cooldown_seconds']
                       for m in self.markets}
         return self.scan_interest.hints(owned, not_before)
 
@@ -323,9 +361,10 @@ class ActiveEngine(Engine):
         for name, events in (self.news.drain() if self.news else {}).items():
             self.pending_news[name] = (self.pending_news.get(name, []) + events)[-100:]
         orders, started, checked = 0, time.monotonic(), 0
-        self.report('scan_batch', {'enabled_races': len(self.markets),
+        self.report('scan_batch', {'enabled_races': len({self.races.race(m['sig_exchange_id']) for m in self.markets}),
+                    'enabled_contracts': len(self.markets),
                     'max_orders': self.execution['max_orders_per_cycle'], 'scan_policy': self.scan_policy,
-                    **self.ledger.summary()})
+                    **self.portfolio_summary()})
         for mapping in self.scanner.batch(self.pending_news, self.config.get('scan_batch_size', 8), self.scan_hints()):
             if self.stopped():
                 return False
@@ -334,7 +373,7 @@ class ActiveEngine(Engine):
                         'scan_policy': self.scan_policy, **self.scanner.selection})
             book, refs, phase = None, None, 'scan'
             try:
-                if time.time()-self.journal.last_order(exchange) < self.config['cooldown_seconds']:
+                if time.time()-self.races.last_order(self.journal, exchange) < self.config['cooldown_seconds']:
                     self.report('skip', {'exchange': exchange, 'reason': 'cooldown'})
                     self.exit_blocked(exchange, 'cooldown', phase)
                     continue
@@ -418,7 +457,11 @@ class ActiveEngine(Engine):
                     time.time()+self.config['order_lifetime_seconds'], timezone.utc).isoformat()}
             fee = D(self.config['strategy']['cost_buffer_per_share'])
             reserve = signal.quantity * (signal.price + fee)
-            self.journal.reserve(payload, reserve)
+            try:
+                self.reserve_order(payload, reserve, account, positions)
+            except ReservationRejected as error:
+                self.report('skip', {'exchange': exchange, 'reason': str(error)})
+                continue
             if self.stopped() or (self.news and self.news.block_reason(mapping)):
                 self.ledger.record(payload, 0, 0, fee)
                 return not self.stopped()
@@ -442,5 +485,5 @@ class ActiveEngine(Engine):
             positions = self.sig.positions()
         self.report('scan_complete', {'quotes_checked': checked, 'orders': orders,
                     'seconds': round(time.monotonic()-started, 2), 'scan_policy': self.scan_policy,
-                    **self.ledger.summary()})
+                    **self.portfolio_summary()})
         return True

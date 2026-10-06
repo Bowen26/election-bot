@@ -72,6 +72,9 @@ def validate_config(config):
             raise ValueError('Enabled mapping names must be unique: ' + label)
         names.add(label)
     validate_risk_config(config)
+    if execution.get("enabled"):
+        from .race_controls import configured_races
+        configured_races(config)
     validate_news(config)
     exchanges = [m['sig_exchange_id'] for m in config['markets'] if m.get('enabled')]
     if len(exchanges) != len(set(exchanges)):

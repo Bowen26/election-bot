@@ -12,16 +12,40 @@ def quote_summary(events, errors):
             if not book.get('issues'):
                 continue
             key = (event.get('phase', 'unknown'), book.get('venue', 'unknown'))
-            group = groups.setdefault(key, {'failures': 0, 'issues': Counter(), 'source_ages': [], 'local_ages': []})
+            group = groups.setdefault(key, {'failures': 0, 'issues': Counter(), 'source_ages': [], 'local_ages': [], 'timing_classes': Counter(), 'request_times': [], 'cache_ages': []})
             group['failures'] += 1
             group['issues'].update(book['issues'])
+            transport = book.get('transport') or {}
+            for name, field in (('request_times', 'request_seconds'), ('cache_ages', 'cache_age_seconds')):
+                value = transport.get(field)
+                if type(value) in (int, float) and math.isfinite(value):
+                    group[name].append(value)
+            age = transport.get('cache_age_seconds')
+            limit = book.get('max_age_seconds', 15)
+            if type(age) in (int, float) and age > limit:
+                category = 'cached_response_older_than_limit'
+            elif 'local_stale' in book['issues'] or (transport.get('request_seconds') or 0) > limit:
+                category = 'slow_request_or_local_delay'
+            elif 'source_stale' in book['issues']:
+                origin = transport.get('http_origin_age_seconds')
+                response = transport.get('response_age_seconds')
+                category = ('old_source_timestamp_recent_HTTP_response'
+                    if all(type(v) in (int, float) and 0 <= v <= limit for v in (origin, response))
+                    else 'old_source_timestamp_transport_unverified')
+            else:
+                category = 'other_quote_issue'
+            group['timing_classes'][category] += 1
             for kind in ('source', 'local'):
                 age = book.get(kind+'_age_seconds')
                 if type(age) in (int, float) and math.isfinite(age):
                     group[kind+'_ages'].append(age)
     rows = []
     for (phase, venue), group in sorted(groups.items()):
-        row = {'phase': phase, 'venue': venue, 'failed_checks': group['failures'], 'issues': dict(group['issues'])}
+        row = {'phase': phase, 'venue': venue, 'failed_checks': group['failures'], 'issues': dict(group['issues']),
+               'timing_classes': dict(group['timing_classes'])}
+        for label in ('request_times', 'cache_ages'):
+            values = group[label]
+            row[label+'_seconds'] = {'min': min(values) if values else None, 'max': max(values) if values else None}
         for kind in ('source', 'local'):
             ages = group[kind+'_ages']
             row[kind+'_age_seconds'] = {'min': min(ages) if ages else None,
@@ -35,7 +59,7 @@ def quote_summary(events, errors):
         'latest_failures': events[-5:],
         'note': 'Failures recorded after this upgrade only, not a failure rate or unique missed opportunities. '
                 'Multiple venues may fail one check. Performance-only observations and final preflight are '
-                'separate phases. Local age is time since the Book object was built; source age uses each '
+                'separate phases. For newly instrumented reference quotes, local age starts at HTTP response receipt; legacy books use construction time. Source age uses each '
                 "venue's timestamp basis. An old source timestamp with recent retrieval does not prove a dead "
                 'feed: it may describe an unchanged book. Freshness guards remain enforced.'}
 

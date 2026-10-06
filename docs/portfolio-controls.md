@@ -1,5 +1,7 @@
 # Portfolio controls and quote observations
 
+Race coin allowances, cooldowns and atomic reservation checks are described in [shared race controls](shared-race-controls.md).
+
 These controls apply to `ActiveEngine` (`execution.enabled: true`) in both paper and live mode. They supplement the existing per-order, per-race, total risk-capital and daily gross-buy coin limits. They do not change the price-gap thresholds, reference-depth gates or news rules.
 
 ## Configuration

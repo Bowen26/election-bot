@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from email.utils import parsedate_to_datetime
 import hashlib
 import json
+import math
 import socket
 import ssl
 import time
@@ -58,6 +59,7 @@ class HTTP:
         self.opener = urllib.request.build_opener(NoRedirect())
         self.last_read = self.last_write = 0.0
         self.server_at = 0.0
+        self.last_timing = None
 
     def request(self, path, method='GET', params=None, payload=None):
         if not path.startswith('/') or '://' in path or '..' in path:
@@ -80,14 +82,23 @@ class HTTP:
             data = json.dumps(payload, allow_nan=False).encode()
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         started = time.time()
+        self.last_timing = None
         try:
             with self.opener.open(request, timeout=8) as response:
                 body = response.read(4_000_001)
                 if len(body) > 4_000_000:
                     raise APIError("API response too large", venue=self.venue)
+                received = time.time()
                 date = response.headers.get('Date')
                 age = float(response.headers.get('Age', '0'))
                 self.server_at = parsedate_to_datetime(date).timestamp() - age if date else started
+                def finite(value):
+                    return value if value is not None and math.isfinite(value) else None
+                self.last_timing = {'request_started_at': started, 'received_at': received,
+                    'request_seconds': finite(received-started),
+                    'http_date_at': finite(self.server_at+age) if date else None,
+                    'cache_age_seconds': finite(age),
+                    'http_date_minus_cache_age_at': finite(self.server_at) if date else None}
                 return json.loads(body)
         except urllib.error.HTTPError as error:
             # Response bodies can contain user data; never log them or the key.
@@ -300,14 +311,17 @@ class References:
             data = kalshi_future.result()['orderbook_fp']
             poly_data = poly_future.result()
         from .strategy import D
+        kt, pt = self.kalshi.last_timing, self.clob.last_timing
         kb = Book.make(data['yes_dollars'], [(1-D(p), q) for p, q in data['no_dollars']],
-                       self.kalshi.server_at, venue='Kalshi', timestamp_basis='http_date_minus_cache_age')
+                       self.kalshi.server_at, venue='Kalshi', timestamp_basis='http_date_minus_cache_age',
+                       observed_at=kt['received_at'] if kt else None, transport=kt)
         data = poly_data
         if str(data['asset_id']) != token or data['market'] != poly['conditionId']:
             raise ValueError("Polymarket token/condition mismatch")
         pb = Book.make([(r['price'], r['size']) for r in data['bids']],
                        [(r['price'], r['size']) for r in data['asks']],
-                       float(data['timestamp']) / 1000, venue='Polymarket', timestamp_basis='exchange_book_timestamp')
+                       float(data['timestamp']) / 1000, venue='Polymarket', timestamp_basis='exchange_book_timestamp',
+                       observed_at=pt['received_at'] if pt else None, transport=pt)
         books = [kb, pb]
         for i, field in enumerate(('kalshi_yes_matches_sig_yes', 'polymarket_yes_matches_sig_yes')):
             if not isinstance(mapping[field], bool):

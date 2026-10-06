@@ -20,9 +20,11 @@ class Book:
     source_at: float
     venue: str = 'unknown'
     timestamp_basis: str = 'unspecified'
+    transport: dict = None
 
     @classmethod
-    def make(cls, bids, asks, source_at=None, venue='unknown', timestamp_basis='unspecified'):
+    def make(cls, bids, asks, source_at=None, venue='unknown', timestamp_basis='unspecified',
+             observed_at=None, transport=None):
         def levels(rows, reverse):
             merged = {}
             for price, size in rows:
@@ -33,18 +35,25 @@ class Book:
                     merged[price] = merged.get(price, D(0)) + size
             return sorted(merged.items(), reverse=reverse)
         now = time.time()
-        return cls(levels(bids, True), levels(asks, False), now,
-                   now if source_at is None else float(source_at), venue, timestamp_basis)
+        return cls(levels(bids, True), levels(asks, False),
+                   now if observed_at is None else float(observed_at),
+                   now if source_at is None else float(source_at), venue, timestamp_basis, transport)
 
     def complement(self):
         return Book([(1-p, q) for p, q in self.asks],
                     [(1-p, q) for p, q in self.bids],
-                    self.observed_at, self.source_at, self.venue, self.timestamp_basis)
+                    self.observed_at, self.source_at, self.venue, self.timestamp_basis, self.transport)
 
     def diagnostic(self, max_age, max_spread=None, venue=None, now=None):
         now = time.time() if now is None else now
         result = {'venue': venue or self.venue, 'timestamp_basis': self.timestamp_basis,
                   'max_age_seconds': max_age, 'issues': []}
+        if self.transport is not None:
+            result['transport'] = dict(self.transport)
+            for name, stamp in (('response_age_seconds', self.transport.get('received_at')),
+                                ('http_origin_age_seconds', self.transport.get('http_date_minus_cache_age_at'))):
+                result['transport'][name] = (round(now-stamp, 3)
+                    if type(stamp) in (int, float) and math.isfinite(stamp) else None)
         for name, stamp in (('local', self.observed_at), ('source', self.source_at)):
             if not math.isfinite(stamp):
                 result[name+'_age_seconds'] = None
@@ -154,12 +163,15 @@ def choose(sig, references, settings, available, diagnostics=None, side_limits=N
     return max(candidates, key=lambda s: s.edge) if candidates else None
 
 
-def choose_exit(sig, references, settings, execution, held, cost, per_order, diagnostics=None, quantity_cap=None):
+def choose_exit(sig, references, settings, execution, held, cost, per_order, diagnostics=None, quantity_cap=None, reference_policy='legacy'):
     """Sell owned shares when overpriced, or when a profitable gap has converged."""
+    if reference_policy not in ('legacy', 'route_depth', 'sig_depth'):
+        raise ValueError('Unknown exit reference policy')
     detail = diagnostics if diagnostics is not None else {}
     detail.update(status='not_applicable', reason='no_position')
     if not held:
         return None
+    detail['reference_policy'] = reference_policy
     # Apply the same freshness, spread and agreement checks as entries.
     choose(sig, references, settings, 0)
     side = 'yes' if held > 0 else 'no'
@@ -173,7 +185,11 @@ def choose_exit(sig, references, settings, execution, held, cost, per_order, dia
     tick, fee = D('.005'), D(settings['cost_buffer_per_share'])
     if price % tick or not tick <= price <= 1-tick:
         raise ValueError('SIG exit price is not a valid limit-order tick')
-    if any(r.asks[0][1] < D(settings['min_reference_depth']) for r in refs):
+    ask_depth = min(r.asks[0][1] for r in refs)
+    bid_depth = min(r.bids[0][1] for r in refs)
+    required_depth = D(settings['min_reference_depth'])
+    detail['min_reference_bid_depth'] = str(bid_depth)
+    if reference_policy == 'legacy' and ask_depth < required_depth:
         detail['reason'] = 'reference_ask_depth'
         return None
     reference = max(r.asks[0][0] for r in refs)
@@ -192,6 +208,15 @@ def choose_exit(sig, references, settings, execution, held, cost, per_order, dia
             'net_profit_per_share_at_average_cost': str(price-fee-average_cost),
             'minimum_profit_per_share': str(execution['take_profit_min']),
             'required_bid_for_average_profit': str(average_cost+fee+D(execution['take_profit_min']))}}
+    if reference_policy != 'legacy':
+        detail['routes']['overpriced_exit']['depth_passes'] = ask_depth >= required_depth
+        detail['routes']['convergence_take_profit']['depth_passes'] = bid_depth >= required_depth
+        price_eligible = overpriced or converged
+        overpriced = overpriced and ask_depth >= required_depth
+        converged = converged and bid_depth >= required_depth
+        if price_eligible and not (overpriced or converged):
+            detail['reason'] = 'route_reference_depth'
+            return None
     if not (overpriced or converged):
         detail['reason'] = ('price_not_converged' if price < max(r.bids[0][0] for r in refs)
                             else 'profit_below_minimum')
@@ -199,8 +224,11 @@ def choose_exit(sig, references, settings, execution, held, cost, per_order, dia
     share_limit = abs(D(held)) if quantity_cap is None else D(quantity_cap)
     if quantity_cap is not None:
         detail['exposure_headroom'] = str(share_limit)
+    reference_size = (ask_depth if reference_policy == 'legacy' or overpriced else bid_depth)
+    if reference_policy == 'sig_depth':
+        reference_size = abs(D(held))  # Gate remains; reference is not the execution venue.
     quantity = int(min(share_limit, abs(D(held)), depth, D(settings['max_shares_per_order']),
-                       min(r.asks[0][1] for r in refs), D(per_order) / price))
+                       reference_size, D(per_order) / price))
     if not quantity:
         detail['reason'] = 'exposure_limit' if share_limit < 1 else 'size_below_one_share'
         return None

@@ -249,6 +249,8 @@ class RiskIntegrationTests(unittest.TestCase):
     def test_exit_selling_no_is_shrunk_when_it_removes_offset(self):
         base = self.config['markets'][0]
         self.config['markets'].append(dict(base, name='offset', sig_exchange_id='3', sig_market_id='3'))
+        # Race assignments are captured at startup, as in a config reload.
+        self.engine = ActiveEngine(self.config, self.sig, self.refs, self.journal, self.temp.name, live=True)
         self.seed('long', 100, '.2', exchange='3')
         self.seed('short', 20, '.2', side='no')
         # Net is 80; only 20 NO can be sold under cap 100.
@@ -270,6 +272,8 @@ class RiskIntegrationTests(unittest.TestCase):
     def test_reduced_exit_quantity_still_uses_actual_fifo_cost(self):
         base = self.config['markets'][0]
         self.config['markets'].append(dict(base, name='offset', sig_exchange_id='3', sig_market_id='3'))
+        # Race assignments are captured at startup, as in a config reload.
+        self.engine = ActiveEngine(self.config, self.sig, self.refs, self.journal, self.temp.name, live=True)
         self.seed('expensive', 10, '.8')
         self.seed('cheap', 10, '.2')
         self.seed('offset', 118, '.2', exchange='3', side='no')
@@ -371,6 +375,40 @@ class RiskIntegrationTests(unittest.TestCase):
         shadow = json.loads(self.journal.db.execute(
             "SELECT detail FROM events WHERE kind='shadow_decision'").fetchone()[0])
         self.assertEqual(shadow['status'], 'unavailable')
+        self.assertFalse(self.journal.pending())
+
+    def test_exit_experiment_cannot_submit_alternative_sales(self):
+        self.seed('held', 30, '.60')
+        self.sig.prices['2'] = ('.745', '.750')
+        original = self.refs.books
+        def thin(*args):
+            refs = original(*args)
+            for book in refs:
+                book.asks = [(price, D(5)) for price, _ in book.asks]
+            return refs
+        with patch.object(self.refs, 'books', side_effect=thin) as reads:
+            self.engine.cycle()
+            self.assertEqual(reads.call_count, 1)  # No shadow preflight or extra feed fetch.
+        self.assertFalse(self.sig.orders)
+        study = json.loads(self.journal.db.execute(
+            "SELECT detail FROM events WHERE kind='exit_shadow'").fetchone()[0])
+        self.assertIsNone(study['decisions'][0]['candidate'])
+        self.assertEqual(study['decisions'][1]['candidate']['action'], 'sell')
+        self.assertEqual(study['decisions'][1]['candidate']['side'], 'yes')
+        self.assertFalse(self.journal.pending())
+        self.assertEqual(self.engine.ledger.held('2')[0], 30)
+
+    def test_exit_experiment_failure_cannot_block_existing_live_exit(self):
+        self.seed('held', 30, '.60')
+        self.sig.prices['2'] = ('.80', '.85')
+        with patch('election_bot.active_engine.exit_experiment', side_effect=ValueError('measurement aged out')):
+            self.engine.cycle()
+        self.assertEqual(len(self.sig.orders), 1)
+        self.assertEqual(self.sig.orders[1]['action'], 'sell')
+        studies = [json.loads(r[0]) for r in self.journal.db.execute(
+            "SELECT detail FROM events WHERE kind='exit_shadow'")]
+        self.assertEqual(len(studies), 1)  # Scan only, no preflight duplication.
+        self.assertEqual(studies[0]['status'], 'unavailable')
         self.assertFalse(self.journal.pending())
 
     def test_invalid_quote_is_logged_as_invalid_not_refreshed(self):

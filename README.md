@@ -127,6 +127,18 @@ The shorter horizons apply only to buys filled after the updated bot first start
 
 After restarting the active bot, it also records prospective entry proposals using the current conservative reference, Kalshi's bid and Polymarket's bid, while retaining common liquidity/risk checks. These records cannot submit orders or change live decisions. Their hypothetical outcomes assume displayed fills, use both buffers and require sufficient future SIG depth; they are not realized returns or an independent portfolio simulation. See [the methodology and limitations](docs/reference-leadership.md). Existing snapshots support the leadership report; historical shadow decisions are not backfilled.
 
+## Exit-depth comparison and stale-feed diagnostics
+
+After restarting, `python3 -m election_bot exit-study` compares the current exit rule against two simulated alternatives: use the reference side relevant to the exit route, then size from SIG liquidity while retaining reference-depth gates. Add `--json --hours 24` for detailed proposals and follow-up outcomes. This does not enable alternative exits or change budgets. See [the exit-depth methodology](docs/exit-depth-study.md).
+
+`diagnostics` now separates HTTP receipt/cache timing from exchange book age. Reference local age starts at each HTTP response receipt; source timestamps and freshness requirements stay intact. The new fields help investigate old Polymarket timestamps without treating recent retrieval as proof of current prices.
+
+## Alternative contracts and settlement review
+
+`python3 -m election_bot contract-review` groups the saved Democratic, Republican and Independent Party contract listings by race, flags settlement-basis differences and shows a combined race budget. Use `--race 2026:senate:NE --json` for details or add `--refresh` to fetch fresh rules and books for that one configured race. Default reporting is offline; refresh uses GET requests only. See [contract-review methodology](docs/contract-review.md).
+
+Structural identity checks do not establish equivalent payouts. Candidate mappings stay disabled, basis surcharges remain uncalibrated, and no new party contracts trade automatically. Active execution now shares race coin budgets and cooldowns across configured sibling contracts and rechecks limits when reserving orders. [Shared race controls](docs/shared-race-controls.md) explains persistent assignments and the settlement findings. One enabled contract per race remains enforced until settlement policy, exposure treatment and routing are ready.
+
 ## Full competition coverage
 
 The current audit covers all 237 SIG contracts (117 contests). The saved configuration enables **107 races: 30 Senate, 31 governor, 46 House**. Ten contests remain excluded because the reference identity or settlement rules could not be verified. See [the complete coverage report](COVERAGE.md), including each exclusion. Separate Republican and independent contracts are not enabled alongside the selected Democratic-party contract. Buying its NO is not identical to buying Republican YES.

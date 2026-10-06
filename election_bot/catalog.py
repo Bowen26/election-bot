@@ -6,7 +6,12 @@ STATES = dict(zip(STATE_NAMES, ('AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS
     'VA WA WV WI WY').split()))
 
 
-def verify_candidate(review):
+def verify_candidate(review, party="Democratic Party"):
+    if party not in ("Democratic Party", "Republican Party"):
+        raise ValueError("Independent/candidate contracts require individual attribution review")
+    adjective = party.removesuffix(" Party")
+    plural = "Democrats" if adjective == "Democratic" else "Republicans"
+    suffix = "D" if adjective == "Democratic" else "R"
     mapping, record = review['mapping'], review['contract']
     year, office, place = mapping['race_key'].split(':')
     code = place.split('-')[0]
@@ -19,46 +24,46 @@ def verify_candidate(review):
         district = int(place.split('-')[1])
         race_name = 'U.S. House ' + state + ' District ' + str(district)
         sig_race = place + ' House race'
-        ticker = 'HOUSE' + code + str(district) + '-26-D'
-        question = 'Will the Democratic Party win the ' + place + ' House seat?'
+        ticker = 'HOUSE' + code + str(district) + '-26-' + suffix
+        question = 'Will the ' + party + ' win the ' + place + ' House seat?'
         rule = ('If the House member sworn in for ' + place + ' for the term beginning in 2027 '
-                'is a member of the Democratic party, then the market resolves to Yes.')
+                'is a member of the ' + adjective + ' party, then the market resolves to Yes.')
         description_start = ('This market will resolve according to the party of the candidate who wins the '
             + place + ' congressional district seat in the U.S. House of Representatives in the 2026 midterm elections.')
     elif office == 'senate':
         race_name = 'U.S. Senate ' + state
         sig_race = state + ' Senate'
-        ticker = 'SENATE' + code + '-26-D'
-        question = 'Will the Democrats win the ' + state + ' Senate race in 2026?'
-        rule = ('If a representative of the Democratic party is sworn in as a Senator of ' + state +
+        ticker = 'SENATE' + code + '-26-' + suffix
+        question = 'Will the ' + plural + ' win the ' + state + ' Senate race in 2026?'
+        rule = ('If a representative of the ' + adjective + ' party is sworn in as a Senator of ' + state +
                 ' for the term beginning in 2027, then the market resolves to Yes.')
         description_start = 'This market will resolve according to the winner of the 2026 midterm ' + state + ' U.S. Senate election'
     else:
         race_name = 'Governor of ' + state
         sig_race = state + ' Governor'
-        ticker = 'GOVPARTY' + code + '-26-D'
-        question = 'Will the Democrats win the ' + state + ' governor race in 2026?'
-        rule = ('If a representative of the Democratic party is inaugurated as the governor of ' + state +
+        ticker = 'GOVPARTY' + code + '-26-' + suffix
+        question = 'Will the ' + plural + ' win the ' + state + ' governor race in 2026?'
+        rule = ('If a representative of the ' + adjective + ' party is inaugurated as the governor of ' + state +
                 ' pursuant to the 2026 election, then the market resolves to Yes.')
         description_start = 'This market will resolve according to the winner of the 2026 ' + state + ' gubernatorial election.'
     expected = {'usState': code, 'raceName': race_name, 'raceStage': 'General',
-        'winnerName': 'Democratic Party', 'electionDate': '2026-11-03',
+        'winnerName': party, 'electionDate': '2026-11-03',
         'resolutionType': 'Party Winner', 'contractType': 'Election Outcome',
         'officeLevel': 'State' if office == 'governor' else 'Federal'}
     if root['node_type'] != 'contract' or any(details.get(k) != v for k, v in expected.items()):
         raise ValueError('SIG structured resolution identity mismatch')
-    if record['sig']['title'] != 'Will the Democratic Party win the ' + sig_race + '?':
+    if record['sig']['title'] != 'Will the ' + party + ' win the ' + sig_race + '?':
         raise ValueError('SIG title mismatch')
     if (str(record['sig']['id']) != mapping['sig_market_id'] or
             record['sig']['exchange'] != mapping['sig_exchange_id'] or record['sig']['option'].upper() != 'YES'):
         raise ValueError('SIG exchange mismatch')
     tickers = {ticker}
     if office == 'house':
-        tickers.add('KXHOUSERACE-' + place.replace('-', '') + '-26-D')
+        tickers.add('KXHOUSERACE-' + place.replace('-', '') + '-26-' + suffix)
     if mapping['kalshi_ticker'] not in tickers or record['kalshi']['ticker'] != mapping['kalshi_ticker']:
         raise ValueError('Kalshi ticker mismatch')
     rules = {rule.casefold()}
-    if code == 'MN':
+    if code == 'MN' and adjective == 'Democratic':
         rules.add(rule.replace('Democratic party', 'Democratic (DFL) party').casefold())
     if record['kalshi']['rules_primary'].casefold() not in rules:
         raise ValueError('Kalshi settlement rule needs individual review')
@@ -68,5 +73,5 @@ def verify_candidate(review):
     if (record['orientations'] != [True, True] or
             mapping['kalshi_yes_matches_sig_yes'] is not True or
             mapping['polymarket_yes_matches_sig_yes'] is not True):
-        raise ValueError('Expected direct Democratic party outcome on all three venues')
+        raise ValueError('Expected direct matching party outcome on all three venues')
     return True

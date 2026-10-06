@@ -102,7 +102,9 @@ class Ledger:
                 self.db.execute('DELETE FROM valuations WHERE exchange=?', (payload['exchangeId'],))
         self._cache = None
 
-    def inventory(self):
+    def inventory(self, refresh=False):
+        if refresh:
+            self._cache = None
         if self._cache is not None:
             return self._cache
         self._cache = inventory_from_executions(self.db.execute('SELECT * FROM executions ORDER BY at,rowid'))

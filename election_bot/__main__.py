@@ -97,6 +97,14 @@ def main():
     leadership.add_argument('--paper', action='store_true')
     leadership.add_argument('--json', action='store_true')
     leadership.add_argument('--hours', type=float, default=48, help='Lookback in hours, up to 720 (default: 48)')
+    exits = sub.add_parser('exit-study', help='Read prospective exit-depth comparisons; no network')
+    exits.add_argument('--paper', action='store_true')
+    exits.add_argument('--json', action='store_true')
+    exits.add_argument('--hours', type=float, default=24)
+    contracts = sub.add_parser('contract-review', help='Read settlement and alternative-contract evidence; never enables trading')
+    contracts.add_argument('--race', help='Exact race_key, e.g. 2026:senate:NE')
+    contracts.add_argument('--json', action='store_true')
+    contracts.add_argument('--refresh', action='store_true', help='GET fresh rules and books for one --race and save review evidence')
     args = parser.parse_args()
     if args.command == 'demo':
         from .demo import run_demo
@@ -117,8 +125,25 @@ def main():
                 os.fsync(handle.fileno())
         print('Local setup saved. Next: discover --tournaments, then edit ' + str(args.config))
         return
-    if args.command == 'leadership':
-        from .leadership import report, format_report
+    if args.command == 'contract-review':
+        from .contract_review import report, format_report, refresh_race
+        if args.refresh and not args.race:
+            parser.error('contract-review --refresh requires --race')
+        config = json.loads(args.config.read_text())
+        if args.refresh:
+            sig = Sig(key(), config['tournament_slug'])
+            evidence = refresh_race(config, args.race, sig, References())
+            directory = RUNTIME / 'contract-reviews'
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            save_json(directory / (fingerprint(args.race)+'.json'), evidence)
+        result = report(config, RUNTIME, args.race)
+        output(result) if args.json else print(format_report(result))
+        return
+    if args.command in ('leadership', 'exit-study'):
+        if args.command == 'exit-study':
+            from .exit_study import report, format_report
+        else:
+            from .leadership import report, format_report
         result = report(RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3'), hours=args.hours)
         if args.json:
             output(result)
