@@ -7,7 +7,7 @@ import time
 
 from .leadership import HORIZONS, future_quote, load_events
 from .strategy import D, choose_exit
-from .profit_exit import profit_target
+from .profit_exit import profit_target, profit_exit_mode
 from .exit_trend import settings as trend_settings
 from dataclasses import replace
 
@@ -23,7 +23,7 @@ def checked_exit(book, refs, settings, execution, held, cost, per_order, sale_ba
     signal = choose_exit(book, refs, settings, execution, held, cost, per_order,
                          detail, quantity_cap, reference_policy=policy)
     trend = (policy == 'legacy' and execution.get('profit_target_enabled', False)
-             and execution.get('profit_exit_mode', 'fixed') == 'trend')
+             and profit_exit_mode(execution) == 'trend')
     # Overpricing remains an independent risk exit. All profitable exits use the
     # trend gate in this mode, including a legacy convergence proposal.
     if trend and signal and signal.reason == 'convergence_take_profit':
@@ -161,6 +161,8 @@ def report(path, now=None, hours=24):
     db = sqlite3.connect(path.as_uri()+'?mode=ro', uri=True)
     try:
         db.execute('BEGIN')
+        from .maintenance import retention_info
+        base['event_retention'] = retention_info(db)
         if not db.execute("SELECT 1 FROM sqlite_master WHERE name='events' AND type='table'").fetchone():
             return base
         since = now-hours*3600
@@ -258,4 +260,6 @@ def format_report(result):
             formatted = '—' if value is None else f'{float(value)*100:.3f} cents/share'
             lines.append(f'{policy}: {r["measured"]} measured; {formatted}; {r["statuses"]}')
     lines.append('\nMissing outcomes are not zero. Proposals are correlated and fills are assumptions. Use --json for details.')
+    if result.get('event_retention', {}).get('archived_rows'):
+        lines.append('Older measurement events are archived; this report excludes them. See --json event_retention.')
     return '\n'.join(lines)

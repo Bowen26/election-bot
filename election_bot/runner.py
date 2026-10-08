@@ -2,6 +2,7 @@
 import time
 
 from .clients import APIError
+from .clock_guard import ClockSampleUnavailable
 
 
 def transient_read(error):
@@ -54,9 +55,21 @@ def connect(factory, stopped, report):
 
 def run_loop(engine, once=False, news=None):
     failures = 0
+    clock_failures = 0
     while not engine.stopped():
         try:
             running = engine.cycle()
+        except ClockSampleUnavailable as error:
+            if once:
+                raise
+            clock_failures += 1
+            delay = min(60, 5 * 2**min(clock_failures-1, 4))
+            engine.report('clock_pause', {'reason': str(error), **error.detail,
+                'retry_in_seconds': delay, 'pending_orders': len(engine.journal.pending()),
+                'action': 'No orders while timing is unverified; next cycle reconciles and reads fresh SIG data'})
+            if not wait(engine, delay):
+                return
+            continue
         except APIError as error:
             if once or not transient_read(error):
                 raise
@@ -70,11 +83,16 @@ def run_loop(engine, once=False, news=None):
             if not wait(engine, delay):
                 return
             continue
+        if clock_failures and running:
+            engine.report('clock_recovered', {'samples_rejected_before_recovery': clock_failures})
+            clock_failures = 0
         if failures:
             engine.report('connection_restored', {'read_failures_before_recovery': failures})
             failures = 0
         if not running or once:
             return
+        if hasattr(engine, 'maintenance'):
+            engine.maintenance()
         config = engine.config
         pause = (config['execution']['batch_pause_seconds']
                  if config.get('execution', {}).get('enabled') else config['poll_seconds'])

@@ -2,6 +2,11 @@
 from .strategy import D, Signal
 
 
+def profit_exit_mode(execution):
+    """Enabling profit-taking without choosing a mode must select trend gates."""
+    return execution.get('profit_exit_mode', 'trend' if execution.get('profit_target_enabled') else 'fixed')
+
+
 def profit_target(book, settings, execution, held, cost, per_order, sale_basis,
                   detail, quantity_cap=None):
     """Called only after normal SIG/reference quote validation by checked_exit."""

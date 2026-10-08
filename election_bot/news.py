@@ -295,8 +295,10 @@ class NewsStore:
                         # A later permitted source can flag a story first seen on an alert-only source.
                         count += 0 if inserted else 1
                         if category == 'disputed_result':
-                            exchange = next(m['sig_exchange_id'] for m in config['markets']
-                                            if m.get('enabled') and m.get('name') == market)
+                            # Disabled mappings may still hold inventory. Preserve the
+                            # dispute by mapping name even if no usable exchange ID exists.
+                            mapping = next(m for m in config['markets'] if m.get('name') == market)
+                            exchange = mapping.get('sig_exchange_id') or ''
                             self.db.execute('INSERT OR IGNORE INTO disputes VALUES (?,?,?,?,NULL,NULL)',
                                             (aid, market, str(exchange), now))
                         self.db.execute('INSERT INTO pauses VALUES (?,?,?) ON CONFLICT(market) DO UPDATE SET '

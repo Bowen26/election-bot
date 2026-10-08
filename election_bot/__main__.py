@@ -81,6 +81,8 @@ def main():
     run = sub.add_parser('run', help='Run continuously; paper mode unless --live is supplied')
     run.add_argument('--live', action='store_true', help='Automatically submit SIG competition orders with no per-trade prompts')
     run.add_argument('--once', action='store_true')
+    watch = sub.add_parser('watch', help='Run with bounded automatic crash recovery; honors STOP')
+    watch.add_argument('--live', action='store_true', help='Supervise live SIG competition trading')
     sub.add_parser('recover', help='Reconcile live pending orders; replay unknown requests only after expiration')
     sub.add_parser('stop', help='Write the stop signal; does not liquidate holdings')
     sub.add_parser('resume', help='Clear the stop signal; does not launch the bot')
@@ -180,6 +182,10 @@ def main():
         return
     if args.command == 'status':
         output({'stop_requested': (RUNTIME / 'STOP').exists()})
+        supervisor_status = RUNTIME / 'supervisor' / 'status.json'
+        if supervisor_status.exists():
+            output({'supervisor_last_recorded': json.loads(supervisor_status.read_text()),
+                    'note': 'Last recorded state, not a process-liveness check.'})
         for mode in ('paper', 'live'):
             path = RUNTIME / (mode + '.sqlite3')
             if path.exists():
@@ -203,6 +209,9 @@ def main():
     path = args.config if args.config.exists() else ROOT / 'config.example.json'
     config = json.loads(path.read_text())
     validate_config(config)
+    if args.command == 'watch':
+        from .supervisor import watch
+        raise SystemExit(watch(ROOT, RUNTIME, path, live=args.live))
     if args.command == 'coverage':
         from collections import Counter
         enabled = [m for m in config['markets'] if m.get('enabled')]
@@ -329,4 +338,5 @@ if __name__ == '__main__':
         sys.exit(130)
     except Exception as error:
         print('HALTED: ' + str(error), file=sys.stderr)
-        sys.exit(1)
+        from .supervisor import failure_code
+        sys.exit(failure_code(error))

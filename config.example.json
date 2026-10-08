@@ -101,7 +101,6 @@
     "take_profit_min": "0.02",
     "profit_target_enabled": false,
     "reentry_cooldown_seconds": 1800,
-    "profit_exit_mode": "fixed",
     "exit_trend": {
       "window_seconds": 1800,
       "sample_spacing_seconds": 60,

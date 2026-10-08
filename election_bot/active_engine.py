@@ -7,6 +7,7 @@ import uuid
 
 from .clients import APIError, contract_record, fingerprint, iso_time
 from .engine import Engine
+from .clock_guard import SubmissionClockUnavailable
 from .ledger import Ledger
 from .scanner import ScanInterest
 from .shadow import decisions as shadow_decisions
@@ -14,6 +15,8 @@ from .exit_study import checked_exit, experiment as exit_experiment
 from .risk import Exposure, LOSS_FIELD, verify_account_inventory, bind_exposure_modes
 from .settlement import multi_races, verify_review, entry_settings
 from .race_controls import RaceGroups
+from .profit_exit import profit_exit_mode
+from .exit_coverage import exit_coverage
 from .exit_trend import ExitTrend, assess as assess_exit_trend
 from .strategy import BookValidationError, D, choose
 
@@ -35,11 +38,13 @@ class ActiveEngine(Engine):
         self.races = RaceGroups(self.config, self.journal.db)
         self.races.bind(self.journal.db)
         bind_exposure_modes(self.ledger, self.config)
+        Exposure(self.ledger, self.config)  # Validate existing holdings/pending metadata at startup.
         self.sibling_races = multi_races(self.config)
         self.cache = {}
         self.execution = self.config['execution']
-        self.exit_trend = ExitTrend(self.journal.db) if self.execution.get('profit_exit_mode') == 'trend' else None
+        self.exit_trend = ExitTrend(self.journal.db) if profit_exit_mode(self.execution) == 'trend' else None
         self.latest_exit_epoch = None
+        self.last_exit_coverage = None
         self.scan_interest = ScanInterest()
         self.scan_policy = 'priority_v1' if self.execution.get('priority_scanning', True) else 'news_round_robin'
         self.scanner.set_policy(self.scan_policy)
@@ -400,6 +405,10 @@ class ActiveEngine(Engine):
 
     def cycle(self):
         self.reconcile()
+        coverage = exit_coverage(self.ledger.inventory()[0], self.config)
+        if coverage != self.last_exit_coverage:
+            self.report('exit_coverage', coverage)
+            self.last_exit_coverage = coverage
         self.check_loss_stop()
         if self.stopped():
             return False
@@ -529,7 +538,14 @@ class ActiveEngine(Engine):
             self.report('signal', {'exchange': exchange, 'order_key': payload['idempotencyKey'],
                                    'snapshot_id': self.latest_snapshot_id, **vars(signal)})
             if self.live:
-                response = self.sig.place(payload)
+                try:
+                    response = self.sig.place(payload)
+                except SubmissionClockUnavailable:
+                    # No POST was attempted; record zero fill atomically, never a guessed fill.
+                    self.ledger.record(payload, 0, 0, fee)
+                    self.report('order_not_submitted', {'exchange': exchange,
+                        'order_key': payload['idempotencyKey'], 'reason': 'clock_sample_unavailable'})
+                    raise
                 self.journal.response(payload['idempotencyKey'], response)
                 self.finish(payload['idempotencyKey'], payload, response, reserve)
             else:

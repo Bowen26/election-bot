@@ -318,6 +318,8 @@ def report(path, now=None, hours=48):
     db = sqlite3.connect(path.as_uri()+'?mode=ro', uri=True)
     try:
         db.execute('BEGIN')
+        from .maintenance import retention_info
+        base['event_retention'] = retention_info(db)
         if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='events'").fetchone():
             return base
         rows, counts = load_events(db, now-hours*3600, now)
@@ -347,4 +349,6 @@ def format_report(result):
     lines.extend(['', 'Follow% includes flat SIG outcomes as non-following; recent moves require at least 1 cent.',
                   'Missing observations are not zero returns. Shadow fills are assumptions, not orders.',
                   'Use --json for paired comparisons, day/race breakdowns, delays and limitations.'])
+    if result.get('event_retention', {}).get('archived_rows'):
+        lines.append('Older measurement events are archived; this report excludes them. See --json event_retention.')
     return '\n'.join(lines)

@@ -107,7 +107,7 @@ class TimingTests(unittest.TestCase):
             self.assertEqual(book.complement().transport, transport)
             self.assertEqual(book.diagnostic(15)['transport']['http_origin_age_seconds'],21)
 
-    def test_HTTP_records_only_timing_and_clears_after_failure(self):
+    def test_HTTP_records_only_timing_and_preserves_success_after_failure(self):
         client = HTTP('https://clob.polymarket.com')
         response = Mock(); response.read.return_value=b'{}'
         response.headers={'Date':'Tue, 14 Nov 2023 22:13:20 GMT','Age':'4'}
@@ -121,7 +121,7 @@ class TimingTests(unittest.TestCase):
         self.assertNotIn('headers',client.last_timing)
         client.opener.open.side_effect=TimeoutError()
         with self.assertRaises(RuntimeError): client.request('/book')
-        self.assertIsNone(client.last_timing)
+        self.assertEqual(client.last_timing['received_at'],T+2)
 
     def test_reference_books_use_each_responses_receipt_time(self):
         refs=References(); self.addCleanup(refs.close)

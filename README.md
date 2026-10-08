@@ -46,7 +46,7 @@ Then run the continuous bot. The `--live` flag selects automatic **SIG competiti
 python3 -m election_bot run --live
 ```
 
-Without `--live`, `run` stays in paper mode. `--once` works in either mode. Paper and live journals are separate. The process must keep running; closing the terminal or putting the computer to sleep interrupts it. This version does not install a service or restart itself after failures. In VS Code choose “Paper trading” or “LIVE SIG competition trading” from Run and Debug.
+Without `--live`, `run` stays in paper mode. `--once` works in either mode. Paper and live journals are separate. The process must keep running; closing the terminal or putting the computer to sleep interrupts it. The `watch` command can restart retryable worker failures; it does not install a background service. In VS Code choose “Paper trading” or “LIVE SIG competition trading” from Run and Debug.
 
 From another terminal in this folder:
 
@@ -224,3 +224,23 @@ Kalshi's REST order book has no exchange-event timestamp in the response used he
 Use the recorded news events, price reviews and later snapshots to test whether external prices or news actually lead SIG. Further extensions include structured polling data, additional official election-result sources, websocket price feeds, correlated exposure limits and exit logic. This starter intentionally does not import the older Kalshi market maker or the much larger NautilusTrader framework.
 
 API references: [SIG API](https://sig.thesuper.market/api/v1/docs), [Kalshi public market data](https://docs.kalshi.com/getting_started/quick_start_market_data), [Kalshi order book](https://docs.kalshi.com/api-reference/market/get-market-orderbook), [Polymarket prices and order books](https://docs.polymarket.com/market-data/prices-order-books).
+
+
+### Automatic crash recovery
+
+Use `python3 -m election_bot watch --live` instead of `run --live` to supervise the bot in the terminal. Stop the existing bot with Ctrl+C first. Omit `--live` for supervised paper mode. The watcher restarts unexpected worker crashes with 5/10/20-second delays, at most three times in 15 minutes, then sets STOP for review. Each worker uses the normal startup reconciliation; the watcher never clears the journal, resets budgets, or runs `recover`/`resume` automatically.
+
+Ctrl+C, `stop`, normal completion, and known accounting, database, authentication, hard clock or risk halts do not auto-restart. Temporary API read outages already retry within the worker. Keep the terminal session running and the Mac awake; this is not a login/background service. `status` includes the watcher's last recorded state, which is not a liveness check. See [supervision behavior](docs/automatic-recovery.md).
+
+Slow or expired SIG clock samples now cause `clock_pause` and fresh-cycle retries rather than terminating continuous execution. Genuine clock jumps, invalid evidence and definite excessive offsets still halt. See [clock verification and recovery](docs/clock-and-reference-workers.md).
+
+
+### Review fixes and event retention
+
+Enabling `profit_target_enabled` with no `profit_exit_mode` now selects trend confirmation and partial exits. Fixed mode must be explicitly selected. Existing installed trend settings and trading budgets are unchanged.
+
+The inventory-aware engine checks exposure metadata for existing local holdings and pending orders during startup. It logs `exit_coverage` after reconciliation and whenever configuration-level coverage changes: owned positions, disabled/unmapped contracts, and disabled selling. This is not a guarantee of an executable exit; quotes, news and account checks still apply. `performance` includes the latest coverage event from the past 24 hours.
+
+Disabled news mappings can still protect held contracts: disputed-result ingestion now records their persistent dispute without rolling back the feed. Mapping-name and exchange-based dispute checks remain active.
+
+Old high-volume diagnostic events are preserved in compressed archives before removal from the active SQLite journal. See [event retention](docs/event-retention.md) for the seven-day hot window, reporting limitations and failure guarantees.

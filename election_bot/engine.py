@@ -9,6 +9,8 @@ from .clients import APIError, contract_record, fingerprint, iso_time
 from .strategy import D, choose
 from .news import validate_news
 from .scanner import Scanner
+from .profit_exit import profit_exit_mode
+from .clock_guard import ClockSampleUnavailable, SubmissionClockUnavailable
 
 
 def validate_config(config):
@@ -20,7 +22,7 @@ def validate_config(config):
             raise ValueError('sell_enabled must be boolean')
         if type(execution.get('profit_target_enabled', False)) is not bool:
             raise ValueError('profit_target_enabled must be boolean')
-        if execution.get('profit_exit_mode', 'fixed') not in ('fixed', 'trend'):
+        if profit_exit_mode(execution) not in ('fixed', 'trend'):
             raise ValueError('profit_exit_mode must be fixed or trend')
         from .exit_trend import settings as trend_settings
         trend_settings(execution)
@@ -115,6 +117,8 @@ class Engine:
         self.scanner = Scanner(self.markets, self.runtime)
         self.pending_news = {}
         self.clock_reported = False
+        self.latest_snapshot_id = None
+        self.last_maintenance = None
 
     def check_clock(self):
         checker = getattr(self.sig, 'check_clock', None)
@@ -123,6 +127,10 @@ class Engine:
         from .clock_guard import ClockCheckError
         try:
             result = checker()
+        except ClockSampleUnavailable as error:
+            self.clock_reported = False
+            self.journal.event('clock_sample_unavailable', {'reason': str(error), **error.detail})
+            raise
         except ClockCheckError as error:
             self.journal.event('clock_halt', {'reason': str(error)})
             raise
@@ -133,6 +141,15 @@ class Engine:
     def report(self, kind, detail):
         self.journal.event(kind, detail)
         print(json.dumps({'event': kind, **detail}, default=str), flush=True)
+
+    def maintenance(self):
+        now = time.monotonic()
+        if self.last_maintenance is None or now-self.last_maintenance >= 300:
+            from .maintenance import archive_events
+            result = archive_events(self.journal, self.runtime)
+            self.last_maintenance = now
+            if result:
+                self.report('event_archive', result)
 
     def stopped(self):
         return (self.runtime / 'STOP').exists()
@@ -313,7 +330,14 @@ class Engine:
                     self.report('skip', {'exchange': exchange, 'reason': block})
                     continue
             if self.live:
-                response = self.sig.place(payload)
+                try:
+                    response = self.sig.place(payload)
+                except SubmissionClockUnavailable:
+                    # Only this pre-POST exception proves the new reservation is unused.
+                    self.journal.complete(payload['idempotencyKey'], 0)
+                    self.report('order_not_submitted', {'exchange': exchange,
+                        'order_key': payload['idempotencyKey'], 'reason': 'clock_sample_unavailable'})
+                    raise
                 self.journal.response(payload['idempotencyKey'], response)
                 self.finish(payload['idempotencyKey'], payload, response, reserved)
             else:

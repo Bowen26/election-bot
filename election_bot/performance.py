@@ -87,15 +87,17 @@ def report(path):
     try:
         db.execute('BEGIN')  # One consistent read snapshot while the bot keeps writing.
         tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        from .maintenance import retention_info
         now = time.time()
         result = {'as_of': now, 'unresolved_orders': db.execute(
             "SELECT COUNT(*) FROM orders WHERE state='pending'").fetchone()[0]}
+        result['event_retention'] = retention_info(db)
         reasons, checks = Counter(), Counter()
         scans, visits, quotes = [], [], []
         quote_failures, feed_errors, exits = [], [], []
         for row in db.execute('SELECT * FROM events WHERE at>=? ORDER BY at', (time.time()-86400,)):
             detail = json.loads(row['detail'])
-            if row['kind'] in ('portfolio_risk', 'risk_stop'):
+            if row['kind'] in ('portfolio_risk', 'risk_stop', 'exit_coverage'):
                 result['latest_' + row['kind']] = {'at': row['at'], **detail}
             if row['kind'] == 'skip':
                 reasons[detail.get('reason', 'unknown')] += 1

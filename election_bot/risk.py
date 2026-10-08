@@ -184,7 +184,7 @@ def verify_account_inventory(ledger, positions):
 def bind_exposure_modes(ledger, config):
     """Gross mode cannot silently be changed back into an offsetting signed asset."""
     if 'net_shares_total' not in config['limits']:
-        if ledger.db.execute("SELECT 1 FROM sqlite_master WHERE name='exposure_modes'").fetchone():
+        if ledger.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='exposure_modes'").fetchone():
             if ledger.db.execute("SELECT 1 FROM exposure_modes WHERE mode='gross'").fetchone():
                 raise ValueError('Gross exposure history requires portfolio share controls')
         return

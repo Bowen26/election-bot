@@ -84,7 +84,6 @@ class HTTP:
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         started = time.time()
         started_monotonic = time.monotonic()
-        self.last_timing = None
         try:
             with self.opener.open(request, timeout=8) as response:
                 body = response.read(4_000_001)
@@ -94,17 +93,19 @@ class HTTP:
                 received_monotonic = time.monotonic()
                 date = response.headers.get('Date')
                 age = float(response.headers.get('Age', '0'))
-                self.server_at = parsedate_to_datetime(date).timestamp() - age if date else started
+                server_at = parsedate_to_datetime(date).timestamp() - age if date else started
                 def finite(value):
                     return value if value is not None and math.isfinite(value) else None
-                self.last_timing = {'request_started_at': started, 'received_at': received,
+                timing = {'request_started_at': started, 'received_at': received,
                     'request_seconds': finite(received-started),
                     'request_started_monotonic': started_monotonic,
                     'received_monotonic': received_monotonic,
-                    'http_date_at': finite(self.server_at+age) if date else None,
+                    'http_date_at': finite(server_at+age) if date else None,
                     'cache_age_seconds': finite(age),
-                    'http_date_minus_cache_age_at': finite(self.server_at) if date else None}
-                return json.loads(body)
+                    'http_date_minus_cache_age_at': finite(server_at) if date else None}
+                result = json.loads(body)
+                self.server_at, self.last_timing = server_at, timing
+                return result
         except urllib.error.HTTPError as error:
             # Response bodies can contain user data; never log them or the key.
             retry_after = None
@@ -206,7 +207,12 @@ class Sig:
     def place(self, payload):
         if payload['tournamentId'] != self.tid:
             raise ValueError("Wrong tournament")
-        self.check_clock()  # Last backstop, including explicit recovery replays.
+        from .clock_guard import ClockSampleUnavailable, SubmissionClockUnavailable
+        try:
+            self.check_clock()  # Last backstop, including explicit recovery replays.
+        except ClockSampleUnavailable as error:
+            # This exception proves no HTTP order request was attempted here.
+            raise SubmissionClockUnavailable(str(error), error.detail) from error
         return self.http.request('/orders', 'POST', payload=payload)
 
     def cancel(self, order_id):

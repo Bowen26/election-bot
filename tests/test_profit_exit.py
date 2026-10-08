@@ -13,7 +13,7 @@ from election_bot.exit_study import checked_exit, experiment
 from election_bot.strategy import Book, D
 
 
-ENABLED = dict(EXECUTION, profit_target_enabled=True, reentry_cooldown_seconds=1800)
+ENABLED = dict(EXECUTION, profit_target_enabled=True, profit_exit_mode="fixed", reentry_cooldown_seconds=1800)
 
 
 class ProfitTargetTests(unittest.TestCase):
@@ -104,7 +104,7 @@ class ProfitEngineTests(unittest.TestCase):
         self.fixture.setUp(); self.addCleanup(self.fixture.doCleanups)
         f = self.fixture
         self.config,self.sig,self.refs,self.engine,self.journal = f.config,f.sig,f.refs,f.engine,f.journal
-        self.engine.execution.update(profit_target_enabled=True,reentry_cooldown_seconds=1800)
+        self.engine.execution.update(profit_target_enabled=True,profit_exit_mode="fixed",reentry_cooldown_seconds=1800)
         self.mapping = self.config['markets'][0]
 
     def buy(self):
@@ -170,7 +170,7 @@ class ProfitEngineTests(unittest.TestCase):
 class RaceReentryTests(unittest.TestCase):
     def setUp(self):
         self.f=races.RaceControlsTests();self.f.setUp();self.addCleanup(self.f.doCleanups)
-        self.f.config['execution'].update(profit_target_enabled=True,reentry_cooldown_seconds=1800)
+        self.f.config['execution'].update(profit_target_enabled=True,profit_exit_mode="fixed",reentry_cooldown_seconds=1800)
 
     def test_disabled_sibling_sale_blocks_new_buys_under_atomic_guard(self):
         f=self.f;f.fill('buy','3',10);f.fill('sell','3',2,action='sell')
