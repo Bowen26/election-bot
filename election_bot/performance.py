@@ -135,7 +135,16 @@ def report(path):
             db.execute('SELECT * FROM executions ORDER BY at,rowid'))
         result['realized_pnl_after_buffers'] = str(sum(realized.values(), D(0)))
         result['open_cost_with_entry_buffer'] = str(sum((v['cost'] for v in holdings.values()), D(0)))
-        result['open_races'] = len({ex for ex, side in holdings})
+        open_exchanges = {ex for ex, side in holdings}
+        result['open_contracts'] = len(open_exchanges)
+        result['open_races'] = len(open_exchanges)
+        result['race_count_basis'] = 'legacy_exchange_count'
+        if 'race_bindings' in tables:
+            assignments = dict(db.execute('SELECT exchange,race FROM race_bindings'))
+            missing = sorted(open_exchanges-set(assignments))
+            result['open_races'] = len({assignments[ex] for ex in open_exchanges}) if not missing else None
+            result['race_count_basis'] = 'persisted_race_bindings'
+            result['unmapped_race_exchanges'] = missing
         result['position_news_risk'] = position_dispute_report(Path(path).parent / 'news.sqlite3', holdings)
         pending = sum((D(r[0]) for r in db.execute("SELECT amount FROM orders WHERE state='pending'")), D(0))
         result['risk_committed'] = str(D(result['open_cost_with_entry_buffer']) +

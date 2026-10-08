@@ -18,6 +18,19 @@ def validate_config(config):
             raise ValueError('priority_scanning must be boolean')
         if type(execution.get('sell_enabled')) is not bool:
             raise ValueError('sell_enabled must be boolean')
+        if type(execution.get('profit_target_enabled', False)) is not bool:
+            raise ValueError('profit_target_enabled must be boolean')
+        if execution.get('profit_exit_mode', 'fixed') not in ('fixed', 'trend'):
+            raise ValueError('profit_exit_mode must be fixed or trend')
+        from .exit_trend import settings as trend_settings
+        trend_settings(execution)
+        if execution.get('profit_exit_mode') == 'trend' and not execution.get('profit_target_enabled'):
+            raise ValueError('Trend profit exits require profit_target_enabled')
+        reentry = execution.get('reentry_cooldown_seconds', 0)
+        if type(reentry) is not int or not 0 <= reentry <= 86400:
+            raise ValueError('reentry_cooldown_seconds must be an integer from 0 to 86400')
+        if execution.get('profit_target_enabled') and reentry < 60:
+            raise ValueError('Profit-target exits require at least 60 seconds of reentry cooldown')
         for field, low, high in [('max_orders_per_cycle', 1, 10),
                                   ('metadata_cache_seconds', 0, 1800), ('batch_pause_seconds', 1, 20)]:
             if type(execution.get(field)) is not int or not low <= execution[field] <= high:
@@ -86,7 +99,9 @@ def validate_config(config):
         raise ValueError('scan_batch_size must be an integer from 1 to 20')
     enabled = [m for m in config['markets'] if m.get('enabled')]
     races = [m.get('race_key', m['sig_market_id']) for m in enabled]
-    if len(races) != len(set(races)):
+    from .settlement import validate_multicontract_config
+    validate_multicontract_config(config)
+    if len(races) != len(set(races)) and not execution.get("multi_contract_races", False):
         raise ValueError('Enable only one contract per race; alternate parties share the same risk')
 
 
@@ -99,6 +114,21 @@ class Engine:
         self.markets = [m for m in config['markets'] if m.get('enabled')]
         self.scanner = Scanner(self.markets, self.runtime)
         self.pending_news = {}
+        self.clock_reported = False
+
+    def check_clock(self):
+        checker = getattr(self.sig, 'check_clock', None)
+        if checker is None:
+            return  # Synthetic offline brokers have no SIG HTTP clock evidence.
+        from .clock_guard import ClockCheckError
+        try:
+            result = checker()
+        except ClockCheckError as error:
+            self.journal.event('clock_halt', {'reason': str(error)})
+            raise
+        if not self.clock_reported:
+            self.report('clock_check', result)
+            self.clock_reported = True
 
     def report(self, kind, detail):
         self.journal.event(kind, detail)
@@ -173,6 +203,7 @@ class Engine:
         if self.config.get('news', {}).get('enabled') and self.news is None:
             raise ValueError('News is enabled but its monitor has not been initialized')
         account = self.sig.account()
+        self.check_clock()
         now = time.time()
         if (account['status'] != 'active' or account.get('isPendingEnrolment') or
                 not account.get('startDate') or not account.get('endDate') or
@@ -252,6 +283,7 @@ class Engine:
                 return False
             # A large batch can take time. Recheck available cash before reserving.
             fresh_account = self.sig.account()
+            self.check_clock()
             if (fresh_account['id'] != self.sig.tid or fresh_account['status'] != 'active'
                     or fresh_account.get('isPendingEnrolment')
                     or time.time() + self.config['order_lifetime_seconds'] >= iso_time(fresh_account['endDate'])):

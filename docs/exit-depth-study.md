@@ -1,6 +1,6 @@
 # Exit-depth study and reference-feed timing
 
-This is the first targeted experiment after the 24-hour review. It records alternative exit proposals against the same real holdings and SIG book while continuing to trade with the existing exit rule. It does not raise order, race, daily, portfolio or directional limits.
+This is the first targeted experiment after the 24-hour review. It records alternative exit proposals against the same real holdings and SIG book independently of the optional live profit-target route. It does not raise order, race, daily, portfolio or directional limits.
 
 After restarting the bot, use a separate terminal in the bot folder:
 
@@ -17,11 +17,11 @@ python3 -m election_bot diagnostics
 
 | Policy | Reference depth gate | Quantity cap from reference depth |
 | --- | --- | --- |
-| `legacy` (live rule) | Both references' outcome asks must meet the configured minimum for either exit route | Smaller reference ask depth |
+| `legacy` (original rule) | Both references' outcome asks must meet the configured minimum for either exit route | Smaller reference ask depth |
 | `route_depth` (simulated) | Ask depth for the overpriced route; bid depth for profitable convergence | Depth on the side used by the selected route |
 | `sig_depth` (simulated) | Same route-specific gates as `route_depth` | None; SIG depth, holdings, exposure headroom, share maximum and per-order coin limit still apply |
 
-The live convergence rule compares the SIG bid against both reference bids but currently requires reference ask liquidity. The first alternative tests using liquidity on the same side as that comparison. The second tests removing external depth from sale quantity because SIG is the execution venue. It retains reference depth as a minimum quality gate.
+The original convergence rule compares the SIG bid against both reference bids but currently requires reference ask liquidity. The first alternative tests using liquidity on the same side as that comparison. The second tests removing external depth from sale quantity because SIG is the execution venue. It retains reference depth as a minimum quality gate.
 
 Both price routes, the entry/exit buffers, quote freshness, reference spreads and agreement remain required as applicable. NO positions use complementary books. The overpriced route has priority if both routes qualify; it can realize a loss, just as it can today. Convergence must pass both average-cost and actual FIFO profitability checks at the proposed quantity. If FIFO fails, the proposal is rejected rather than searching for a favorable smaller lot. Directional headroom still applies to sales, including sales that remove an offsetting position. Disabled selling suppresses every policy.
 
@@ -46,3 +46,9 @@ The journal sample investigated on October 6 contained 991 Polymarket `source_st
 The HTTP client now records request start, response receipt, request duration, HTTP Date, cache Age and Date minus Age, without response headers, credentials or bodies. Each reference book's local observation time starts at its own response receipt, rather than after both concurrent reference requests finish. Waiting for a slow second venue can no longer make the first response appear newly received. Original exchange/source timestamps are retained.
 
 The diagnostics group distinguishes an old source timestamp with a recent HTTP response, an old cached response, slow requests/local delay, and cases without enough transport evidence. Timing fields only explain failures. They do not replace the source timestamp, relax the 15-second freshness rule or prove that an unchanged-looking book is current. Old records have no transport evidence and stay explicitly unverified. Any future freshness-policy change needs separate validation of the feed's timestamp/cache semantics.
+
+## Separate profit-target route
+
+When `execution.profit_target_enabled` is enabled, the live bot can also sell at the existing buffered FIFO profit threshold before reference convergence. This depth study deliberately recomputes all three original policies with that feature disabled, so a live profit-target signal is never mislabeled as a legacy proposal. The study is not evidence of the profitability of the new route. See [profit-target exits](profit-target-exits.md) for behavior and validation.
+
+Trend mode also leaves these three experimental policies unchanged: they are recomputed without the optional profit route. Trend decisions and their evidence appear in `decision.exit_check.trend`; the depth study is not a backtest of trend exits.

@@ -32,9 +32,10 @@ def main():
     binding = dest.execute('SELECT binding FROM identity').fetchone()[0]
     dest.close()
     journal = Journal(dest_path, binding)
+    refs_client = References()
     try:
         sig = ReadOnlySig(key(), config['tournament_slug'])
-        engine = ActiveEngine(config, sig, References(), journal, ROOT / '.runtime/v2-validation', live=True)
+        engine = ActiveEngine(config, sig, refs_client, journal, ROOT / '.runtime/v2-validation', live=True)
         engine.sync_history()
         engine.sync_history()  # Idempotent import of confirmed old trades.
         account, positions = sig.account(), sig.positions()
@@ -68,7 +69,10 @@ def main():
         save_json(ROOT / '.runtime/v2-validation.json', result)
         print(json.dumps(result, indent=2))
     finally:
-        journal.close()
+        try:
+            refs_client.close()
+        finally:
+            journal.close()
 
 
 if __name__ == '__main__':

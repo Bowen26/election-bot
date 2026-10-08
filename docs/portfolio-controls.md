@@ -19,7 +19,9 @@ The user-approved local settings are:
 
 Add these fields inside `limits`. With the current `total: "25000"`, the realized-loss threshold is 2,500 coins. The fraction uses configured risk capital, not the account's 100,000-coin starting balance. Changing total risk capital also changes this threshold.
 
-Each enabled mapping requires an explicit `office` (`house`, `senate` or `governor`) and integer `exposure_sign` (`1` when SIG YES follows the common factor, `-1` when it opposes it). The current audited catalog uses Democratic-party YES contracts, so its sign is `1`. A NO outcome covers all non-Democratic outcomes; it is not necessarily a Republican contract. New or changed mappings require review, not inference from a ticker in the trading loop. Keep exposure metadata for disabled races that still have holdings. Missing metadata for held or pending inventory halts trading.
+Signed-mode mappings require an explicit `office` (`house`, `senate` or `governor`) and integer `exposure_sign` (`1` when SIG YES follows the common factor, `-1` when it opposes it). The current audited catalog uses Democratic-party YES contracts, so its sign is `1`. A NO outcome covers all non-Democratic outcomes; it is not necessarily a Republican contract. New or changed mappings require review, not inference from a ticker in the trading loop. Keep exposure metadata for disabled races that still have holdings. Missing metadata for held or pending inventory halts trading.
+
+The optional [multi-contract mode](multi-contract-routing.md) requires `exposure_mode: gross` for sibling contracts and retains their exposure as an interval without assumed offsets; it omits `exposure_sign`. Signed and gross holdings share the same caps.
 
 Older configurations without these additional fields retain their existing behavior. Setting either share limit requires both. Configured portfolio controls are rejected in the earlier entry-only engine rather than silently ignored. The starter config retains the earlier mode and smaller coin limits; configure active execution and these fields together.
 
@@ -49,7 +51,7 @@ It is checked after reconciliation, before submission, and after fills. Meeting 
 
 ## Startup validation
 
-Enabled mappings require nonempty names, numeric positive SIG IDs, Kalshi/Polymarket identifiers, explicit boolean outcome orientations and a reviewed SHA-256 contract fingerprint. Names and enabled race/exchange identities must be unique; with exposure controls, even disabled duplicate exchange mappings are rejected to avoid ambiguous risk attribution. Missing fields fail before feed requests instead of causing repeated per-race skips.
+Enabled mappings require nonempty names, numeric positive SIG IDs, Kalshi/Polymarket identifiers, explicit boolean outcome orientations and a reviewed SHA-256 contract fingerprint. Names and exchange identities must be unique; repeated enabled race identities require the optional reviewed multi-contract mode; with exposure controls, even disabled duplicate exchange mappings are rejected to avoid ambiguous risk attribution. Missing fields fail before feed requests instead of causing repeated per-race skips.
 
 All API ISO timestamps must include a timezone (`Z` or an explicit offset). Naive timestamps are rejected rather than interpreted in the computer's local timezone. The tournament close cutoff is checked again after quote requests before submission. Base-engine paper recovery now releases an unfilled reservation with zero cost.
 

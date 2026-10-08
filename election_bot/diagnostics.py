@@ -87,6 +87,12 @@ def exit_summary(events):
                 group['route_blockers']['convergence_take_profit:profit_below_minimum'] += 1
         if convergence.get('fifo_profit_passed') is False:
             group['route_blockers']['convergence_take_profit:fifo_profit_below_minimum'] += 1
+        profit = routes.get('profit_target', {})
+        if 'net_profit_per_share_at_average_cost' in profit:
+            if D(profit['net_profit_per_share_at_average_cost']) < D(profit['minimum_profit_per_share']):
+                group['route_blockers']['profit_target:profit_below_minimum'] += 1
+        if profit.get('fifo_profit_passed') is False:
+            group['route_blockers']['profit_target:fifo_profit_below_minimum'] += 1
         latest[(event['exchange'], phase)] = event
     return {'by_phase': {phase: {'checks': value['checks'], 'statuses': dict(value['statuses']),
                 'reasons': dict(value['reasons']), 'route_blockers': dict(value['route_blockers']),

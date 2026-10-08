@@ -54,6 +54,10 @@ class StatusRetryTests(unittest.TestCase):
         sleep.assert_not_called()
 
     def test_submission_503_is_never_automatically_retried(self):
+        now, mono = time.time(), time.monotonic()
+        self.sig.http.last_timing = {'request_started_at': now-.1, 'received_at': now,
+            'http_date_at': int(now), 'cache_age_seconds': 0,
+            'request_started_monotonic': mono-.1, 'received_monotonic': mono}
         self.sig.http.request.side_effect = APIError('uncertain submission', status=503)
         payload = {'tournamentId': 'test'}
         with self.assertRaises(APIError):

@@ -11,8 +11,10 @@ from .ledger import Ledger
 from .scanner import ScanInterest
 from .shadow import decisions as shadow_decisions
 from .exit_study import checked_exit, experiment as exit_experiment
-from .risk import Exposure, LOSS_FIELD, verify_account_inventory
+from .risk import Exposure, LOSS_FIELD, verify_account_inventory, bind_exposure_modes
+from .settlement import multi_races, verify_review, entry_settings
 from .race_controls import RaceGroups
+from .exit_trend import ExitTrend, assess as assess_exit_trend
 from .strategy import BookValidationError, D, choose
 
 
@@ -32,13 +34,18 @@ class ActiveEngine(Engine):
         self.ledger = Ledger(self.journal)
         self.races = RaceGroups(self.config, self.journal.db)
         self.races.bind(self.journal.db)
+        bind_exposure_modes(self.ledger, self.config)
+        self.sibling_races = multi_races(self.config)
         self.cache = {}
         self.execution = self.config['execution']
+        self.exit_trend = ExitTrend(self.journal.db) if self.execution.get('profit_exit_mode') == 'trend' else None
+        self.latest_exit_epoch = None
         self.scan_interest = ScanInterest()
         self.scan_policy = 'priority_v1' if self.execution.get('priority_scanning', True) else 'news_round_robin'
         self.scanner.set_policy(self.scan_policy)
 
     def check_account(self, account):
+        self.check_clock()
         now = time.time()
         if (account['id'] != self.config['tournament_id'] or account['id'] != self.sig.tid or
                 account['status'] != 'active' or account.get('isPendingEnrolment') or
@@ -138,10 +145,27 @@ class ActiveEngine(Engine):
         if market['status'] != 'open':
             raise ValueError('SIG market closed')
         metadata = self.references.metadata(mapping)
-        if fingerprint(contract_record(market, mapping, metadata)) != mapping.get('contract_fingerprint'):
+        record = contract_record(market, mapping, metadata)
+        if fingerprint(record) != mapping.get('contract_fingerprint'):
             raise ValueError('Contract changed or unreviewed; inspect and pin')
+        if mapping.get('exposure_mode') == 'gross':
+            verify_review(mapping, record, self.config['strategy'])
         self.cache[key] = (time.monotonic(), metadata)
         return metadata
+
+    def news_block(self, mapping):
+        if not self.news:
+            return None
+        siblings = self.sibling_races.get(mapping.get('race_key'), [mapping])
+        for sibling in siblings:
+            reason = self.news.block_reason(sibling)
+            if reason:
+                return reason
+        return None
+
+    def entry_settings(self, mapping):
+        return (entry_settings(mapping, self.config['strategy'])
+                if mapping.get('exposure_mode') == 'gross' else self.config['strategy'])
 
     def held(self, exchange, positions):
         owned, cost = self.ledger.held(exchange)
@@ -168,7 +192,14 @@ class ActiveEngine(Engine):
     def portfolio_summary(self):
         return {**self.ledger.summary(), **self.races.summary(self.ledger)}
 
-    def reserve_order(self, payload, reserve, account, positions):
+    def reentry_wait(self, exchange):
+        seconds = self.execution.get('reentry_cooldown_seconds', 0)
+        if not seconds:
+            return 0
+        last = self.races.last_sale(self.ledger, exchange)
+        return max(0, last+seconds-time.time()) if last else 0
+
+    def reserve_order(self, payload, reserve, account, positions, exit_reason=None, exit_epoch=None):
         """Recheck local limits under the same write lock as the reservation."""
         def guard():
             self.ledger.inventory(refresh=True)  # Include any newly committed execution.
@@ -181,10 +212,21 @@ class ActiveEngine(Engine):
             expected = D(payload['quantity']) * (D(payload['price']) + D(self.config['strategy']['cost_buffer_per_share']))
             if D(reserve) != expected:
                 raise RuntimeError('Reservation amount disagrees with order')
-            if payload['action'] == 'buy' and reserve > self.available(exchange, account):
-                raise ReservationRejected('Coin limits changed before reservation')
+            if payload['action'] == 'buy':
+                if self.reentry_wait(exchange):
+                    raise ReservationRejected('Race is in post-sale reentry cooldown')
+                if reserve > self.available(exchange, account):
+                    raise ReservationRejected('Coin limits changed before reservation')
             if payload['action'] == 'sell':
-                self.ledger.sale_basis(exchange, payload['side'], payload['quantity'])
+                basis = self.ledger.sale_basis(exchange, payload['side'], payload['quantity'])
+                if exit_reason == 'trend_profit_target':
+                    if self.exit_trend is None or exit_epoch != self.exit_trend.epoch(exchange):
+                        raise ReservationRejected('Position changed since trend evaluation')
+                if exit_reason in ('profit_target', 'convergence_take_profit', 'trend_profit_target'):
+                    fee = D(self.config['strategy']['cost_buffer_per_share'])
+                    profit = D(payload['price'])-fee-basis/D(payload['quantity'])
+                    if profit < D(self.execution['take_profit_min']):
+                        raise ReservationRejected('FIFO profit changed before reservation')
             exposure = Exposure(self.ledger, self.config)
             if exposure.enabled:
                 if self.live:
@@ -252,17 +294,35 @@ class ActiveEngine(Engine):
         diagnostics = []
         exit_check = {'status': 'blocked' if held else 'not_applicable',
                       'reason': 'selling_disabled' if held else 'no_position'}
-        entry = choose(book, refs, self.config['strategy'], self.available(exchange, account), diagnostics, side_limits)
+        settings = self.entry_settings(mapping)
+        entry = choose(book, refs, settings, self.available(exchange, account), diagnostics, side_limits)
+        reentry_wait = self.reentry_wait(exchange)
+        if reentry_wait:
+            entry = None
+            for check in diagnostics:
+                if check.get('reason') == 'eligible':
+                    check.update(reason='reentry_cooldown', retry_in_seconds=round(reentry_wait, 1))
+        self.latest_exit_epoch = None
+        trend_check = None
+        if self.exit_trend is not None and held and self.execution['sell_enabled']:
+            trend_context = self.exit_trend.context(mapping, book, refs, held,
+                self.config['strategy'], self.execution, phase)
+            self.latest_exit_epoch = trend_context['epoch']
+            trend_check = lambda quantity: assess_exit_trend(trend_context, quantity)
         sale_basis = lambda side, quantity: self.ledger.sale_basis(exchange, side, quantity)
         exit_signal = checked_exit(book, refs, self.config['strategy'], self.execution, held, cost,
-                                  self.config['limits']['per_order'], sale_basis, exit_check, exit_limit) if self.execution['sell_enabled'] else None
+                                  self.config['limits']['per_order'], sale_basis, exit_check, exit_limit,
+                                  trend_check=trend_check) if self.execution['sell_enabled'] else None
         if entry and held and ((held < 0) != (entry.side == 'no')):
             entry = None  # Never use a complement buy to close or flip inventory.
             diagnostics.append({'reason': 'opposite_inventory'})
         signal = exit_signal or entry
-        self.scan_interest.observe(mapping['name'], diagnostics, refs, self.config['strategy'], held)
+        self.scan_interest.observe(mapping['name'], diagnostics, refs, settings, held)
         self.report('decision', {'exchange': exchange, 'race_key': self.races.race(exchange), 'held': held, 'available': self.available(exchange, account),
             'checks': diagnostics, 'exit_check': exit_check, 'phase': phase,
+            'entry_minimum_edge': settings['minimum_edge'],
+            'reentry_wait_seconds': round(reentry_wait, 1),
+            'routing_policy': 'independent_contract_serial' if mapping.get('exposure_mode') == 'gross' else 'single_contract',
             'snapshot_id': self.latest_snapshot_id, 'exposure': exposure.summary(),
             'action': signal.action if signal else None,
             'reason': signal.reason if signal else 'no_eligible_signal'})
@@ -277,7 +337,7 @@ class ActiveEngine(Engine):
                 'snapshot_id': self.latest_snapshot_id, 'phase': phase})
         if phase == 'scan':
             try:
-                shadow = shadow_decisions(book, refs, self.config['strategy'],
+                shadow = shadow_decisions(book, refs, settings,
                     self.available(exchange, account), held, side_limits, exit_signal is not None)
             except ValueError as error:
                 # A quote can age out during this extra calculation. Measurement
@@ -383,7 +443,7 @@ class ActiveEngine(Engine):
                 book = self.sig.book(exchange)
                 checked += 1
                 self.ledger.observe(exchange, book, self.config['strategy']['max_age_seconds'])
-                block = self.news.block_reason(mapping) if self.news else None
+                block = self.news_block(mapping)
                 if block:
                     self.scan_interest.invalidate(mapping['name'])
                     self.report('skip', {'exchange': exchange, 'reason': block})
@@ -429,7 +489,7 @@ class ActiveEngine(Engine):
                 continue
             if self.stopped():
                 return False
-            if self.news and self.news.block_reason(mapping):
+            if self.news_block(mapping):
                 self.report('skip', {'exchange': exchange, 'reason': 'News pause during preflight'})
                 self.exit_blocked(exchange, 'news_pause', 'pre_submit')
                 continue
@@ -458,11 +518,12 @@ class ActiveEngine(Engine):
             fee = D(self.config['strategy']['cost_buffer_per_share'])
             reserve = signal.quantity * (signal.price + fee)
             try:
-                self.reserve_order(payload, reserve, account, positions)
+                self.reserve_order(payload, reserve, account, positions, exit_reason=signal.reason,
+                                   exit_epoch=self.latest_exit_epoch)
             except ReservationRejected as error:
                 self.report('skip', {'exchange': exchange, 'reason': str(error)})
                 continue
-            if self.stopped() or (self.news and self.news.block_reason(mapping)):
+            if self.stopped() or (self.news_block(mapping)):
                 self.ledger.record(payload, 0, 0, fee)
                 return not self.stopped()
             self.report('signal', {'exchange': exchange, 'order_key': payload['idempotencyKey'],

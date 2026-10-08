@@ -92,6 +92,14 @@ class RaceGroups:
                                  ','.join('?' for _ in members) + ')', members).fetchone()
         return row[0] or 0
 
+    def last_sale(self, ledger, exchange):
+        race = self.race(exchange)
+        members = [ex for ex, key in self.assignments.items() if key == race]
+        row = ledger.db.execute("SELECT MAX(at) FROM executions WHERE action='sell' "
+            "AND CAST(quantity AS REAL)>0 AND exchange IN (" +
+            ','.join('?' for _ in members) + ')', members).fetchone()
+        return row[0] or 0
+
     def summary(self, ledger):
         holdings, realized = ledger.inventory()
         totals = committed_by_race(holdings, realized, ledger.journal.pending(), self.assignments)

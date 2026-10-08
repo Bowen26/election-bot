@@ -124,7 +124,7 @@ class TimingTests(unittest.TestCase):
         self.assertIsNone(client.last_timing)
 
     def test_reference_books_use_each_responses_receipt_time(self):
-        refs=References()
+        refs=References(); self.addCleanup(refs.close)
         refs.kalshi.request=Mock(return_value={'orderbook_fp':{'yes_dollars':[['.5',100]],'no_dollars':[['.4',100]]}})
         refs.clob.request=Mock(return_value={'asset_id':'token','market':'condition','timestamp':str(int(T*1000)),
             'bids':[{'price':'.5','size':'100'}],'asks':[{'price':'.6','size':'100'}]})

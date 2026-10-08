@@ -54,6 +54,13 @@ def validate_risk_config(config):
 def _metadata(mapping):
     if mapping.get('office') not in OFFICES:
         raise ValueError('Explicit office required for exposure mapping: ' + str(mapping.get('name')))
+    mode = mapping.get('exposure_mode', 'signed')
+    if mode not in ('signed', 'gross'):
+        raise ValueError('Unknown exposure_mode')
+    if mode == 'gross':
+        if 'exposure_sign' in mapping:
+            raise ValueError('Gross exposure cannot carry exposure_sign')
+        return mapping['office'], 0
     if type(mapping.get('exposure_sign')) is not int or mapping['exposure_sign'] not in (-1, 1):
         raise ValueError('Explicit exposure_sign (+1 or -1) required for mapping: ' + str(mapping.get('name')))
     return mapping['office'], mapping['exposure_sign']
@@ -74,16 +81,20 @@ class Exposure:
         self.net = {'total': D(0), **{office: D(0) for office in OFFICES}}
         if self.regional_enabled:
             self.net.update({'region:' + region: D(0) for region in CENSUS_REGIONS})
+        self.gross = {group: D(0) for group in self.net}
         self.bounds = {group: [D(0), D(0)] for group in self.net}
         if not self.enabled:
             return
         holdings, _ = ledger.inventory()
+        self.holdings = holdings
         for (exchange, side), value in holdings.items():
             office, sign = self.metadata(exchange)
             delta = value['quantity'] * sign * self.direction('buy', side)
             for group in self.groups(exchange):
                 self.net[group] += delta
-        self.bounds = {group: [net, net] for group, net in self.net.items()}
+                if sign == 0:
+                    self.gross[group] += value['quantity']
+        self.bounds = {group: [net-self.gross[group], net+self.gross[group]] for group, net in self.net.items()}
         for row in ledger.journal.pending():
             payload = json.loads(row['payload'])
             office, sign = self.metadata(payload['exchangeId'])
@@ -91,6 +102,13 @@ class Exposure:
             if quantity < 0 or quantity != int(quantity):
                 raise RuntimeError('Invalid pending exposure quantity; reconcile before trading')
             delta = quantity * sign * self.direction(payload['action'], payload['side'])
+            if sign == 0:
+                # Pending buys may fill fully; a pending sale provides no risk credit.
+                for group in self.groups(payload['exchangeId']):
+                    if payload['action'] == 'buy':
+                        self.bounds[group][0] -= quantity
+                        self.bounds[group][1] += quantity
+                continue
             # Reserve the entire unknown fill interval, including pending sales.
             for group in self.groups(payload['exchangeId']):
                 self.bounds[group][0] += min(D(0), delta)
@@ -121,6 +139,8 @@ class Exposure:
             return None
         office, sign = self.metadata(exchange)
         direction = sign * self.direction(action, side)
+        if sign == 0 and action == 'sell':
+            return self.holdings.get((exchange, side), {}).get('quantity', D(0))
         caps = {'total': D(self.limits['net_shares_total']),
                 office: D(self.limits['net_shares_per_office'])}
         if self.regional_enabled:
@@ -129,12 +149,15 @@ class Exposure:
         for group, cap in caps.items():
             low, high = self.bounds[group]
             # If already outside a cap, allow only moves toward the allowed band.
-            rooms.append(max(D(0), cap-high if direction > 0 else cap+low))
+            rooms.append(max(D(0), min(cap-high, cap+low) if sign == 0 else
+                             cap-high if direction > 0 else cap+low))
         return min(rooms)
 
     def summary(self):
         return {'enabled': self.enabled, 'net_shares': self.net if self.enabled else None,
                 'possible_net_shares_including_pending': self.bounds if self.enabled else None,
+                'unnetted_gross_shares': self.gross if self.enabled else None,
+                'net_shares_excludes_gross_contracts': any(m.get('exposure_mode') == 'gross' for m in self.mappings.values()),
                 'total_cap': self.limits.get('net_shares_total'),
                 'per_office_cap': self.limits.get('net_shares_per_office'),
                 'per_region_cap': self.limits.get(REGION_FIELD),
@@ -156,3 +179,27 @@ def verify_account_inventory(ledger, positions):
         actual[exchange] = actual.get(exchange, D(0)) + quantity
     if {e: q for e, q in expected.items() if q} != {e: q for e, q in actual.items() if q}:
         raise RuntimeError('Account portfolio differs from bot ledger; reconcile before portfolio trading')
+
+
+def bind_exposure_modes(ledger, config):
+    """Gross mode cannot silently be changed back into an offsetting signed asset."""
+    if 'net_shares_total' not in config['limits']:
+        if ledger.db.execute("SELECT 1 FROM sqlite_master WHERE name='exposure_modes'").fetchone():
+            if ledger.db.execute("SELECT 1 FROM exposure_modes WHERE mode='gross'").fetchone():
+                raise ValueError('Gross exposure history requires portfolio share controls')
+        return
+    with ledger.db:
+        ledger.db.execute('CREATE TABLE IF NOT EXISTS exposure_modes (exchange TEXT PRIMARY KEY, mode TEXT NOT NULL)')
+        configured = {m.get('sig_exchange_id') for m in config['markets']}
+        retained = {r[0] for r in ledger.db.execute("SELECT exchange FROM exposure_modes WHERE mode='gross'")}
+        if not retained <= configured:
+            raise ValueError('Keep historical gross mappings disabled instead of removing them; accounting/news review required')
+        for mapping in config['markets']:
+            exchange = mapping.get('sig_exchange_id')
+            if not isinstance(exchange, str) or not exchange.isdigit():
+                continue
+            mode = mapping.get('exposure_mode', 'signed')
+            prior = ledger.db.execute('SELECT mode FROM exposure_modes WHERE exchange=?', (exchange,)).fetchone()
+            if prior and prior[0] == 'gross' and mode != 'gross':
+                raise ValueError('Gross exposure binding cannot be changed to signed without accounting review')
+            ledger.db.execute('INSERT INTO exposure_modes VALUES (?,?) ON CONFLICT(exchange) DO UPDATE SET mode=excluded.mode', (exchange, mode))

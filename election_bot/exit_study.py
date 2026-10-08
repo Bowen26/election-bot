@@ -7,15 +7,28 @@ import time
 
 from .leadership import HORIZONS, future_quote, load_events
 from .strategy import D, choose_exit
+from .profit_exit import profit_target
+from .exit_trend import settings as trend_settings
+from dataclasses import replace
 
 POLICIES = ('legacy', 'route_depth', 'sig_depth')
 
 
 def checked_exit(book, refs, settings, execution, held, cost, per_order, sale_basis,
-                 detail, quantity_cap=None, policy='legacy'):
-    """Shared FIFO check keeps live and experimental convergence exits consistent."""
+                 detail, quantity_cap=None, policy='legacy', trend_check=None):
+    """Shared FIFO check; optional live profit target preserves legacy experiments."""
+    if not execution['sell_enabled']:
+        detail.update(status='blocked', reason='selling_disabled')
+        return None
     signal = choose_exit(book, refs, settings, execution, held, cost, per_order,
                          detail, quantity_cap, reference_policy=policy)
+    trend = (policy == 'legacy' and execution.get('profit_target_enabled', False)
+             and execution.get('profit_exit_mode', 'fixed') == 'trend')
+    # Overpricing remains an independent risk exit. All profitable exits use the
+    # trend gate in this mode, including a legacy convergence proposal.
+    if trend and signal and signal.reason == 'convergence_take_profit':
+        detail['legacy_reason'] = signal.reason
+        signal = None
     if signal and signal.reason == 'convergence_take_profit':
         basis = sale_basis(signal.side, signal.quantity)
         net = signal.price-D(settings['cost_buffer_per_share'])
@@ -25,23 +38,45 @@ def checked_exit(book, refs, settings, execution, held, cost, per_order, sale_ba
                      fifo_profit_passed=net-basis/signal.quantity >= D(execution['take_profit_min']))
         if net-basis/signal.quantity < D(execution['take_profit_min']):
             detail.update(status='blocked', reason='fifo_profit_below_minimum')
-            return None
+            signal = None
+    if signal is None and policy == 'legacy' and execution.get('profit_target_enabled', False):
+        detail['legacy_reason'] = detail.get('reason')
+        cap = quantity_cap
+        if trend and held:
+            partial = max(1, int(abs(D(held))*D(trend_settings(execution)['partial_fraction'])))
+            cap = partial if cap is None else min(D(cap), partial)
+            detail['partial_quantity_cap'] = str(cap)
+        signal = profit_target(book, settings, execution, held, cost, per_order,
+                               sale_basis, detail, cap)
+        if trend and signal:
+            check = trend_check(signal.quantity) if trend_check else {
+                'allowed': False, 'reason': 'trend_history_unavailable'}
+            detail['trend'] = check
+            if check['allowed']:
+                signal = replace(signal, reason='trend_profit_target')
+                detail.update(reason=signal.reason, trend_trigger=check['reason'])
+            else:
+                detail.update(status='blocked', reason=check['reason'])
+                signal = None
     return signal
 
 
 def experiment(book, refs, settings, execution, held, cost, per_order, sale_basis,
                baseline, baseline_detail, quantity_cap=None):
     fee = D(settings['cost_buffer_per_share'])
+    live_profit_target = execution.get('profit_target_enabled', False)
+    # Never relabel a new live profit-target proposal as historical "legacy".
+    study_execution = dict(execution, profit_target_enabled=False)
     decisions = []
     for policy in POLICIES:
-        detail = dict(baseline_detail) if policy == 'legacy' else {}
+        detail = dict(baseline_detail) if policy == 'legacy' and not live_profit_target else {}
         if not execution['sell_enabled']:
             signal = None
             detail.update(status='blocked', reason='selling_disabled')
-        elif policy == 'legacy':
+        elif policy == 'legacy' and not live_profit_target:
             signal = baseline
         else:
-            signal = checked_exit(book, refs, settings, execution, held, cost,
+            signal = checked_exit(book, refs, settings, study_execution, held, cost,
                                   per_order, sale_basis, detail, quantity_cap, policy)
         candidate = None
         if signal:
@@ -210,7 +245,7 @@ def report(path, now=None, hours=24):
 
 
 def format_report(result):
-    lines = ['EXIT DEPTH STUDY — simulated proposals; live exit rule unchanged']
+    lines = ['EXIT DEPTH STUDY — legacy depth comparisons; excludes the optional profit-target route']
     if result['status'] != 'ok':
         return '\n'.join(lines+[result['status']])
     lines.append('Records: '+str(result['events']))

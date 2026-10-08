@@ -101,6 +101,7 @@ def main():
     exits.add_argument('--paper', action='store_true')
     exits.add_argument('--json', action='store_true')
     exits.add_argument('--hours', type=float, default=24)
+    sub.add_parser('clock-check', help='Read SIG response timing and verify local clock; no orders')
     contracts = sub.add_parser('contract-review', help='Read settlement and alternative-contract evidence; never enables trading')
     contracts.add_argument('--race', help='Exact race_key, e.g. 2026:senate:NE')
     contracts.add_argument('--json', action='store_true')
@@ -132,7 +133,8 @@ def main():
         config = json.loads(args.config.read_text())
         if args.refresh:
             sig = Sig(key(), config['tournament_slug'])
-            evidence = refresh_race(config, args.race, sig, References())
+            with References() as refs:
+                evidence = refresh_race(config, args.race, sig, refs)
             directory = RUNTIME / 'contract-reviews'
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
             save_json(directory / (fingerprint(args.race)+'.json'), evidence)
@@ -235,85 +237,88 @@ def main():
         finally:
             store.close()
         return
-    refs = References()
-    if args.command == 'feeds':
-        for mapping in config['markets']:
-            metadata = refs.metadata(mapping)
-            books = refs.books(mapping, metadata)
-            output({'mapping': mapping['name'], 'venues': [
-                {'venue': venue, 'bid': book.bids[0] if book.bids else None,
-                 'ask': book.asks[0] if book.asks else None,
-                 'source_age_seconds': round(time.time()-book.source_at, 2)}
-                for venue, book in zip(('Kalshi', 'Polymarket'), books)]})
-        return
-    token = key()
-    if args.command == 'run' and not args.once:
-        from .runner import connect
-        sig = connect(lambda: Sig(token, config['tournament_slug']),
-                      lambda: (RUNTIME / 'STOP').exists(), output)
-        if sig is None:
-            print('Stop signal is set. Use resume before run.')
+    with References() as refs:
+        if args.command == 'feeds':
+            for mapping in config['markets']:
+                metadata = refs.metadata(mapping)
+                books = refs.books(mapping, metadata)
+                output({'mapping': mapping['name'], 'venues': [
+                    {'venue': venue, 'bid': book.bids[0] if book.bids else None,
+                     'ask': book.asks[0] if book.asks else None,
+                     'source_age_seconds': round(time.time()-book.source_at, 2)}
+                    for venue, book in zip(('Kalshi', 'Polymarket'), books)]})
             return
-    else:
-        sig = Sig(token, config['tournament_slug'])
-    if args.command == 'discover':
-        output({'tournament': sig.tournament, 'markets': sig.markets(args.search)})
-        return
-    if args.command in ('inspect', 'pin'):
-        matches = [m for m in config['markets'] if m['name'] == args.mapping]
-        if len(matches) != 1:
-            raise ValueError('Mapping name missing or duplicated')
-        mapping = matches[0]
-        record = contract_record(sig.market(mapping['sig_market_id']), mapping, refs.metadata(mapping))
-        output({'tournament': sig.tournament, 'contract': record, 'fingerprint': fingerprint(record)})
-        if args.command == 'pin':
-            mapping['contract_fingerprint'] = fingerprint(record)
-            mapping['enabled'] = True
-            config['tournament_id'] = sig.tid
-            save_json(args.config, config)
-            print('Mapping pinned and enabled. Run remains paper mode unless --live is specified.')
-        return
-    live = args.command == 'recover' or args.live
-    if (RUNTIME / 'STOP').exists() and args.command != 'recover':
-        raise ValueError('Stop signal is set. Use resume before run.')
-    with exclusive_lock(RUNTIME):
-        binding = fingerprint({'tournament': sig.tid, 'key_hash': hashlib.sha256(token.encode()).hexdigest()})
-        journal = Journal(RUNTIME / ('live.sqlite3' if live else 'paper.sqlite3'), binding)
-        engine = None
-        news = None
-        try:
-            if args.command != 'recover' and config.get('news', {}).get('enabled'):
-                news = NewsGate(config, RUNTIME, ('live:' if live else 'paper:') + sig.tid)
-                news.start()
-            engine_class = Engine
-            if config.get('execution', {}).get('enabled'):
-                from .active_engine import ActiveEngine
-                engine_class = ActiveEngine
-            engine = engine_class(config, sig, refs, journal, RUNTIME, live=live, news=news)
-            if args.command == 'recover':
-                engine.reconcile(replay_unknown=True)
-                output(journal.summary())
+        token = key()
+        if args.command == 'run' and not args.once:
+            from .runner import connect
+            sig = connect(lambda: Sig(token, config['tournament_slug']),
+                          lambda: (RUNTIME / 'STOP').exists(), output)
+            if sig is None:
+                print('Stop signal is set. Use resume before run.')
                 return
-            print('LIVE SIG COMPETITION EXECUTION — automatic orders' if live else 'PAPER SIMULATION — no orders submitted', flush=True)
-            from .runner import run_loop
-            run_loop(engine, once=args.once, news=news)
-        finally:
-            original_error = sys.exc_info()[0] is not None
+        else:
+            sig = Sig(token, config['tournament_slug'])
+        if args.command == 'clock-check':
+            output(sig.check_clock())
+            return
+        if args.command == 'discover':
+            output({'tournament': sig.tournament, 'markets': sig.markets(args.search)})
+            return
+        if args.command in ('inspect', 'pin'):
+            matches = [m for m in config['markets'] if m['name'] == args.mapping]
+            if len(matches) != 1:
+                raise ValueError('Mapping name missing or duplicated')
+            mapping = matches[0]
+            record = contract_record(sig.market(mapping['sig_market_id']), mapping, refs.metadata(mapping))
+            output({'tournament': sig.tournament, 'contract': record, 'fingerprint': fingerprint(record)})
+            if args.command == 'pin':
+                mapping['contract_fingerprint'] = fingerprint(record)
+                mapping['enabled'] = True
+                config['tournament_id'] = sig.tid
+                save_json(args.config, config)
+                print('Mapping pinned and enabled. Run remains paper mode unless --live is specified.')
+            return
+        live = args.command == 'recover' or args.live
+        if (RUNTIME / 'STOP').exists() and args.command != 'recover':
+            raise ValueError('Stop signal is set. Use resume before run.')
+        with exclusive_lock(RUNTIME):
+            binding = fingerprint({'tournament': sig.tid, 'key_hash': hashlib.sha256(token.encode()).hexdigest()})
+            journal = Journal(RUNTIME / ('live.sqlite3' if live else 'paper.sqlite3'), binding)
+            engine = None
+            news = None
             try:
-                if engine is not None:
-                    try:
-                        engine.reconcile()
-                    except Exception as cleanup_error:
-                        if not original_error:
-                            raise
-                        print('Shutdown reconciliation incomplete; reservations retained: ' +
-                              str(cleanup_error), file=sys.stderr)
+                if args.command != 'recover' and config.get('news', {}).get('enabled'):
+                    news = NewsGate(config, RUNTIME, ('live:' if live else 'paper:') + sig.tid)
+                    news.start()
+                engine_class = Engine
+                if config.get('execution', {}).get('enabled'):
+                    from .active_engine import ActiveEngine
+                    engine_class = ActiveEngine
+                engine = engine_class(config, sig, refs, journal, RUNTIME, live=live, news=news)
+                if args.command == 'recover':
+                    engine.reconcile(replay_unknown=True)
+                    output(journal.summary())
+                    return
+                print('LIVE SIG COMPETITION EXECUTION — automatic orders' if live else 'PAPER SIMULATION — no orders submitted', flush=True)
+                from .runner import run_loop
+                run_loop(engine, once=args.once, news=news)
             finally:
+                original_error = sys.exc_info()[0] is not None
                 try:
-                    if news:
-                        news.close()
+                    if engine is not None:
+                        try:
+                            engine.reconcile()
+                        except Exception as cleanup_error:
+                            if not original_error:
+                                raise
+                            print('Shutdown reconciliation incomplete; reservations retained: ' +
+                                  str(cleanup_error), file=sys.stderr)
                 finally:
-                    journal.close()
+                    try:
+                        if news:
+                            news.close()
+                    finally:
+                        journal.close()
 
 
 if __name__ == '__main__':

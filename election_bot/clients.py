@@ -1,6 +1,6 @@
 """Documented public venue feeds and authenticated SIG competition API."""
 from datetime import datetime, timezone
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from email.utils import parsedate_to_datetime
 import hashlib
 import json
@@ -8,6 +8,7 @@ import math
 import socket
 import ssl
 import time
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -82,6 +83,7 @@ class HTTP:
             data = json.dumps(payload, allow_nan=False).encode()
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
         started = time.time()
+        started_monotonic = time.monotonic()
         self.last_timing = None
         try:
             with self.opener.open(request, timeout=8) as response:
@@ -89,6 +91,7 @@ class HTTP:
                 if len(body) > 4_000_000:
                     raise APIError("API response too large", venue=self.venue)
                 received = time.time()
+                received_monotonic = time.monotonic()
                 date = response.headers.get('Date')
                 age = float(response.headers.get('Age', '0'))
                 self.server_at = parsedate_to_datetime(date).timestamp() - age if date else started
@@ -96,6 +99,8 @@ class HTTP:
                     return value if value is not None and math.isfinite(value) else None
                 self.last_timing = {'request_started_at': started, 'received_at': received,
                     'request_seconds': finite(received-started),
+                    'request_started_monotonic': started_monotonic,
+                    'received_monotonic': received_monotonic,
                     'http_date_at': finite(self.server_at+age) if date else None,
                     'cache_age_seconds': finite(age),
                     'http_date_minus_cache_age_at': finite(self.server_at) if date else None}
@@ -194,9 +199,14 @@ class Sig:
     def positions(self):
         return self.read('/tournaments/' + self.slug + '/portfolio/positions')['positions']
 
+    def check_clock(self):
+        from .clock_guard import check_timing
+        return check_timing(self.http.last_timing)
+
     def place(self, payload):
         if payload['tournamentId'] != self.tid:
             raise ValueError("Wrong tournament")
+        self.check_clock()  # Last backstop, including explicit recovery replays.
         return self.http.request('/orders', 'POST', payload=payload)
 
     def cancel(self, order_id):
@@ -276,8 +286,41 @@ class References:
         self.kalshi = HTTP('https://external-api.kalshi.com/trade-api/v2')
         self.gamma = HTTP('https://gamma-api.polymarket.com')
         self.clob = HTTP('https://clob.polymarket.com')
+        self._pool = None
+        self._lock = threading.RLock()
+        self._closed = False
+
+    def _ensure_open(self):
+        if self._closed:
+            raise RuntimeError('Reference client is closed')
+
+    def __enter__(self):
+        with self._lock:
+            self._ensure_open()
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    def close(self):
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            if self._pool is not None:
+                self._pool.shutdown(wait=True, cancel_futures=True)
 
     def metadata(self, mapping):
+        with self._lock:
+            self._ensure_open()
+            return self._metadata(mapping)
+
+    def books(self, mapping, metadata):
+        with self._lock:
+            self._ensure_open()
+            return self._books(mapping, metadata)
+
+    def _metadata(self, mapping):
         ticker = urllib.parse.quote(mapping['kalshi_ticker'], safe='')
         kalshi = self.kalshi.request('/markets/' + ticker)['market']
         from .strategy import D
@@ -296,20 +339,28 @@ class References:
             raise ValueError("Unsupported Polymarket outcomes")
         return kalshi, poly, tokens[0]
 
-    def books(self, mapping, metadata):
+    def _books(self, mapping, metadata):
         kalshi, poly, token = metadata
         if kalshi['status'] != 'active' or kalshi.get('result'):
             raise ValueError("Kalshi market is not active")
         if not poly.get('active') or poly.get('closed') or not poly.get('acceptingOrders'):
             raise ValueError("Polymarket market is not accepting orders")
         # Independent public hosts, separate HTTP clients; SIG writes stay serial.
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            kalshi_future = pool.submit(self.kalshi.request,
+        if self._pool is None:
+            self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix='reference-feed')
+        submitted = []
+        try:
+            kalshi_future = self._pool.submit(self.kalshi.request,
                 '/markets/' + urllib.parse.quote(mapping['kalshi_ticker'], safe='') + '/orderbook',
                 params={'depth': 100})
-            poly_future = pool.submit(self.clob.request, '/book', params={'token_id': token})
+            submitted.append(kalshi_future)
+            poly_future = self._pool.submit(self.clob.request, '/book', params={'token_id': token})
+            submitted.append(poly_future)
             data = kalshi_future.result()['orderbook_fp']
             poly_data = poly_future.result()
+        finally:
+            # Also drain work if starting the second request itself fails.
+            wait(submitted)
         from .strategy import D
         kt, pt = self.kalshi.last_timing, self.clob.last_timing
         kb = Book.make(data['yes_dollars'], [(1-D(p), q) for p, q in data['no_dollars']],

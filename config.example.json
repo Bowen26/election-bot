@@ -92,11 +92,27 @@
   "execution": {
     "enabled": false,
     "priority_scanning": true,
+    "multi_contract_races": false,
     "sell_enabled": true,
     "max_orders_per_cycle": 4,
     "metadata_cache_seconds": 900,
     "batch_pause_seconds": 1,
     "exit_edge": "0.02",
-    "take_profit_min": "0.02"
+    "take_profit_min": "0.02",
+    "profit_target_enabled": false,
+    "reentry_cooldown_seconds": 1800,
+    "profit_exit_mode": "fixed",
+    "exit_trend": {
+      "window_seconds": 1800,
+      "sample_spacing_seconds": 60,
+      "max_sample_gap_seconds": 600,
+      "minimum_samples": 3,
+      "confirmation_samples": 2,
+      "minimum_span_seconds": 120,
+      "trailing_drop": "0.02",
+      "reference_weakening": "0.02",
+      "remaining_gap": "0.02",
+      "partial_fraction": "0.25"
+    }
   }
 }
