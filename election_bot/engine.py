@@ -170,7 +170,15 @@ class Engine:
                 if time.time() < iso_time(payload['expirationDate']) + 5:
                     raise RuntimeError('Wait until original order expiration plus five seconds before recover')
                 # Identical payload/key only. Never refresh the expiration or create a retry key.
-                response = self.sig.place(payload)
+                try:
+                    response = self.sig.place(payload)
+                except APIError as error:
+                    recovery = getattr(self, 'recover_expired_rejection', None)
+                    if (error.status == 400 and error.method == 'POST' and error.venue == 'SIG'
+                            and error.rejection == 'expired_order' and recovery is not None):
+                        recovery(row, payload)
+                        continue
+                    raise
                 self.journal.response(row['key'], response)
             self.finish(row['key'], payload, response, D(row['amount']))
 

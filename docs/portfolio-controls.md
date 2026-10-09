@@ -17,7 +17,7 @@ The user-approved local settings are:
 }
 ```
 
-Add these fields inside `limits`. With the current `total: "25000"`, the realized-loss threshold is 2,500 coins. The fraction uses configured risk capital, not the account's 100,000-coin starting balance. Changing total risk capital also changes this threshold.
+Add these fields inside `limits`. With the current `total: "75000"`, the realized-loss threshold is 7,500 coins. The fraction uses configured risk capital, not the account's 100,000-coin starting balance. Changing total risk capital also changes this threshold.
 
 Signed-mode mappings require an explicit `office` (`house`, `senate` or `governor`) and integer `exposure_sign` (`1` when SIG YES follows the common factor, `-1` when it opposes it). The current audited catalog uses Democratic-party YES contracts, so its sign is `1`. A NO outcome covers all non-Democratic outcomes; it is not necessarily a Republican contract. New or changed mappings require review, not inference from a ticker in the trading loop. Keep exposure metadata for disabled races that still have holdings. Missing metadata for held or pending inventory halts trading.
 

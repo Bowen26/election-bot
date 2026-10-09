@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "races": [],
+  "polls": [
+    {
+      "race_key": "2026:senate:NH",
+      "dem_candidate": "Chris Pappas",
+      "rep_candidate": "John E. Sununu",
+      "stage": "general",
+      "population": "lv",
+      "partisan": null,
+      "published_at": "2026-10-09T02:04:35.964719+00:00",
+      "publication_time_basis": "first_observed_by_research_import; original publication time not established",
+      "poll_id": "yougov-nh-2026-10-05-senate",
+      "survey_id": "yougov-nh-2026-10-05",
+      "pollster": "YouGov",
+      "sample_size": 1520,
+      "field_start": "2026-09-28T00:00:00-04:00",
+      "field_end": "2026-10-05T23:59:59-04:00",
+      "dem_pct": 51,
+      "rep_pct": 43,
+      "other_pct": 1,
+      "methodology": "YouGov likely-voter toplines; Q6 includes allocated undecided preferences. No poll-specific design correction fitted.",
+      "source_url": "https://d3nkl3psvxxpe9.cloudfront.net/documents/ttw_nh_20260921_lv.pdf",
+      "source_index": "https://yougov.com/en-us/survey-results",
+      "source_pages": "1-2",
+      "reported_moe_pp": 3.9
+    },
+    {
+      "race_key": "2026:senate:NH",
+      "dem_candidate": "Chris Pappas",
+      "rep_candidate": "John E. Sununu",
+      "stage": "general",
+      "population": "lv",
+      "partisan": null,
+      "published_at": "2026-10-09T02:04:35.964719+00:00",
+      "publication_time_basis": "first_observed_by_research_import; original publication time not established",
+      "poll_id": "rasmussen-nh-2026-10-04-senate",
+      "survey_id": "rasmussen-nh-2026-10-04",
+      "pollster": "Rasmussen Reports",
+      "sample_size": 979,
+      "field_start": "2026-10-02T00:00:00-04:00",
+      "field_end": "2026-10-04T23:59:59-04:00",
+      "dem_pct": 49,
+      "rep_pct": 44,
+      "other_pct": 3,
+      "methodology": "Likely-voter toplines Q1; survey mode not disclosed in retrieved toplines. Sponsorship not independently verified.",
+      "source_url": "https://www.rasmussenreports.com/public_content/politics/public_surveys/toplines_new_hampshire_senate_october_2_4_2026",
+      "reported_moe_pp": 3
+    }
+  ],
+  "notes": "Manually transcribed public source facts; dated seed, not an automatically refreshing feed. Unknown sponsorship receives half weight. Date-only fieldwork uses conservative local end of day."
+}

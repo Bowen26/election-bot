@@ -70,9 +70,9 @@ class ClockEvidenceRegressionTests(unittest.TestCase):
 
     def test_cached_or_missing_Date_cannot_mask_wall_clock_jump(self):
         for sample in [dict(timing(), cache_age_seconds=1), dict(timing(), http_date_at=None)]:
-            with self.subTest(sample=sample), self.assertRaises(ClockCheckError) as raised:
+            with self.subTest(sample=sample), self.assertRaises(ClockSampleUnavailable) as raised:
                 check_timing(sample, T+10, M+.3)
-            self.assertNotIsInstance(raised.exception, ClockSampleUnavailable)
+            self.assertEqual(raised.exception.detail['reason_code'], 'clock_discontinuity')
 
     def test_invalid_numeric_evidence_still_halts(self):
         for field, value in [('http_date_at', float('nan')), ('received_at', True),

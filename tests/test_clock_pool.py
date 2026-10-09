@@ -51,7 +51,7 @@ class ClockTests(unittest.TestCase):
             with self.subTest(sample=sample),self.assertRaises(ClockCheckError):self.check(sample)
         with self.assertRaises(ClockCheckError):self.check(timing(),T+20,M+20)
 
-    def test_local_clock_jump_during_request_and_after_receipt_halts(self):
+    def test_local_clock_jump_during_request_and_after_receipt_rejects_sample(self):
         with self.assertRaisesRegex(ClockCheckError,'Local clock changed'):
             self.check(dict(timing(),received_at=T+3),T+3.1,M+.3)
         with self.assertRaisesRegex(ClockCheckError,'Local clock changed'):

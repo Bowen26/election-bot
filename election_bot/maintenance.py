@@ -9,7 +9,7 @@ import uuid
 
 HOT_DAYS = 7
 BATCH_LIMIT = 2000
-KINDS = ('quote_snapshot','shadow_decision','exit_shadow','scan_visit','scan_quote','decision')
+KINDS = ('quote_snapshot','shadow_decision','exit_shadow','scan_visit','scan_quote','decision','fair_value_shadow')
 
 
 def archive_events(journal, runtime, now=None, limit=BATCH_LIMIT):

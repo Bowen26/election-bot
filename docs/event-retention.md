@@ -1,6 +1,6 @@
 # Event retention
 
-Continuous execution runs bounded maintenance between successful scan cycles, at most once every five minutes. Each pass archives up to 2,000 `quote_snapshot`, `shadow_decision`, `exit_shadow`, `scan_visit`, `scan_quote` and `decision` events older than seven days. One-shot execution does not run maintenance. A backlog can take multiple passes to drain.
+Continuous execution runs bounded maintenance between successful scan cycles, at most once every five minutes. Each pass archives up to 2,000 `quote_snapshot`, `shadow_decision`, `exit_shadow`, `scan_visit`, `scan_quote`, `decision` and `fair_value_shadow` events older than seven days. One-shot execution does not run maintenance. A backlog can take multiple passes to drain.
 
 Each batch is written as a private `.runtime/event-archive/events-<unique-id>.jsonl.gz` file. Every JSON line preserves the original SQLite event rowid, timestamp, kind and exact detail string. The compressed file is flushed, synced, renamed, directory-synced and read back to verify its SHA-256 before any event is deleted. A single database transaction removes only exactly matching rows and records the archive manifest. Changed rows or a database failure roll the transaction back. A crash between file creation and database commit can leave a redundant archive, but keeps the original journal rows. Do not blindly import all files; `event_archives` identifies committed batches. Journal rowids are local identifiers and are not globally unique across archives.
 

@@ -139,6 +139,10 @@ class ActiveEngine(Engine):
             super().reconcile(replay_unknown)
         self.sync_history()
 
+    def recover_expired_rejection(self, row, payload):
+        from .expired_recovery import recover_rejected_expiration
+        recover_rejected_expiration(self, row, payload)
+
     def metadata(self, mapping, force=False):
         key = mapping['name']
         cached = self.cache.get(key)
@@ -284,6 +288,12 @@ class ActiveEngine(Engine):
         self.journal.event('quote_snapshot', {'version': 1, 'snapshot_id': self.latest_snapshot_id,
             'exchange': mapping['sig_exchange_id'], 'phase': phase, 'captured_at': now,
             'orientation': 'SIG YES (references already aligned)', 'quotes': quotes})
+        if phase == 'scan':
+            from .fair_research import observe
+            research = observe(self.runtime, mapping, book, refs, self.entry_settings(mapping),
+                               self.latest_snapshot_id, now=now)
+            if research is not None:
+                self.journal.event('fair_value_shadow', research)
 
     def decide(self, mapping, account, positions, book, refs, phase='scan'):
         exchange = mapping['sig_exchange_id']

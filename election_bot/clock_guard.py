@@ -13,7 +13,7 @@ class ClockCheckError(RuntimeError):
 
 
 class ClockSampleUnavailable(ClockCheckError):
-    """Missing, cached, slow or expired evidence; a fresh sample is required."""
+    """Missing, cached, slow, expired or discontinuous timing; refresh required."""
     def __init__(self, message, detail=None):
         super().__init__(message)
         self.detail = detail or {}
@@ -47,7 +47,16 @@ def check_timing(sample, now=None, monotonic_now=None):
         raise ClockCheckError('SIG clock check unverified: invalid monotonic response timing')
     if (abs(wall_elapsed-elapsed) > MAX_CLOCK_JUMP_SECONDS or
             abs(wall_age-age) > MAX_CLOCK_JUMP_SECONDS):
-        raise ClockCheckError('Local clock changed during or after the SIG request; new orders halted')
+        # This sample spans a clock adjustment or suspend/resume discontinuity.
+        # It cannot establish current skew. Reject it and require a fresh GET;
+        # never reset its timestamps or reuse its apparent server offset.
+        raise ClockSampleUnavailable(
+            'Local clock changed during or after the SIG request; waiting for fresh SIG timing',
+            {'reason_code': 'clock_discontinuity', 'request_seconds': elapsed,
+             'sample_age_seconds': age, 'wall_request_seconds': wall_elapsed,
+             'wall_sample_age_seconds': wall_age,
+             'request_clock_difference_seconds': wall_elapsed-elapsed,
+             'sample_clock_difference_seconds': wall_age-age})
     if sample['http_date_at'] is None:
         raise ClockSampleUnavailable('SIG clock check unverified: missing Date; waiting for fresh evidence',
             {'request_seconds': elapsed, 'sample_age_seconds': age})

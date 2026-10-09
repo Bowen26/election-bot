@@ -103,6 +103,16 @@ def main():
     exits.add_argument('--paper', action='store_true')
     exits.add_argument('--json', action='store_true')
     exits.add_argument('--hours', type=float, default=24)
+    fair = sub.add_parser('fair-value', help='Independent polling research; cannot submit model trades')
+    action = fair.add_mutually_exclusive_group()
+    action.add_argument('--import-json', type=Path, help='Import verified polling evidence with local receipt timestamps')
+    action.add_argument('--seed-public', action='store_true', help='Import the dated, source-checked NH Senate pilot; no model trades')
+    action.add_argument('--fetch-public', action='store_true', help='Stage public polling feed for review; never auto-import')
+    action.add_argument('--template', type=Path, help='Write a draft for up to ten configured Senate contracts')
+    action.add_argument('--demo', action='store_true', help='Run a synthetic offline fair-value comparison')
+    fair.add_argument('--paper', action='store_true')
+    fair.add_argument('--json', action='store_true')
+    fair.add_argument('--hours', type=float, default=24)
     sub.add_parser('clock-check', help='Read SIG response timing and verify local clock; no orders')
     contracts = sub.add_parser('contract-review', help='Read settlement and alternative-contract evidence; never enables trading')
     contracts.add_argument('--race', help='Exact race_key, e.g. 2026:senate:NE')
@@ -112,6 +122,12 @@ def main():
     if args.command == 'demo':
         from .demo import run_demo
         run_demo()
+        return
+    if args.command == 'fair-value':
+        from .fair_cli import run
+        path = args.config if args.config.exists() else ROOT / 'config.example.json'
+        result = run(args, RUNTIME, json.loads(path.read_text()))
+        print(result) if isinstance(result, str) else output(result)
         return
     if args.command == 'setup':
         if not args.config.exists():

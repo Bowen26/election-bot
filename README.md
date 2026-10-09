@@ -65,15 +65,15 @@ For each enabled race, the bot normalizes both external books to the SIG YES out
 | --- | --- |
 | Minimum gap after cost/uncertainty buffer | 5 cents/share |
 | Cost/uncertainty buffer | 1 cent/share |
-| Per-order spending | 50 SUSQies |
-| Per-race risk capital | 250 SUSQies |
-| Total risk capital | 25,000 SUSQies |
+| Per-order spending | 100 SUSQies |
+| Per-race risk capital | 1,000 SUSQies |
+| Total risk capital | 75,000 SUSQies |
 | Net directional shares, total | 5,000 shares |
 | Net directional shares, per office | 2,500 shares |
 | Net directional shares, per Census region | 2,500 shares |
-| Cumulative net realized-loss stop | 2,500 SUSQies (10% of total risk capital) |
+| Cumulative net realized-loss stop | 7,500 SUSQies (10% of total risk capital) |
 | Gross daily buy spending, UTC | 5,000 SUSQies |
-| Maximum shares/order | 100 |
+| Maximum shares/order | 200 |
 | Minimum reference top-bid depth | 20 shares on each venue |
 | Maximum reference spread / midpoint disagreement | 8 cents / 8 cents |
 | Maximum book age | 15 seconds |
@@ -85,7 +85,7 @@ These limits were selected by the user for the 100,000-coin competition account;
 
 The user configuration now enables the inventory-aware execution mode. It buys qualifying price gaps and sells bot-owned YES or NO shares at a limit price when either (a) the SIG bid exceeds both external asks by at least two cents after the exit buffer, or (b) the SIG bid reaches both external bids and the sale clears a two-cent/share profit threshold after entry/exit buffers. Profit-taking also checks the cost of the actual FIFO shares being sold. An optional third route, `execution.profit_target_enabled`, takes profit at a fresh SIG bid without requiring external price convergence. It must clear the same average-cost and FIFO profit threshold after buffers. The local configuration uses `execution.profit_exit_mode: "trend"`: crossing the two-cent buffered FIFO target alone does not sell. It requires spaced confirmation of gap narrowing, weakening at both references, or a sustained SIG bid pullback, then limits the profit sale to 25% of the held position and the existing order limits. See [trend-based partial exits](docs/trend-profit-exits.md). A 30-minute race-wide pause on new buys follows any confirmed sale; further exits remain eligible after their own checks. See [profit-target exits](docs/profit-target-exits.md). An overpriced exit may realize a loss. There is no blanket stop-loss, passive market making, external hedging, guaranteed profit or news-derived valuation.
 
-Risk capital is **open position cost (including entry buffers) plus net realized losses plus unresolved reservations**, globally and per race. Confirmed sales release the cost of the shares sold; losses continue consuming capital, while profits do not expand the configured allowance. The daily cap remains gross buy spending and is not replenished by sales. Each order, including a sale, is limited to 50 coins of notional and available depth. Existing bot purchases are imported from SIG's confirmed lifecycle fill totals on restart; the journal is not reset. Unconfirmed fills halt further submissions.
+Risk capital is **open position cost (including entry buffers) plus net realized losses plus unresolved reservations**, globally and per race. Confirmed sales release the cost of the shares sold; losses continue consuming capital, while profits do not expand the configured allowance. The daily cap remains gross buy spending and is not replenished by sales. Each order, including a sale, is limited to 100 coins of notional and available depth. Existing bot purchases are imported from SIG's confirmed lifecycle fill totals on restart; the journal is not reset. Unconfirmed fills halt further submissions.
 
 Only bot-owned inventory is eligible for automatic sales. Account holdings must match the bot's reconstructed position; with portfolio controls enabled, mismatches halt new trading across the portfolio. SIG has no reduce-only parameter in the reviewed API: a sell exceeding holdings can become a complement buy. Avoid concurrent manual trading or another bot on these same positions. This bot checks holdings just before submission, serializes its own writes, verifies the canonical response and cancels its own remainder before halting on a mismatch, but cannot make the remote position check and submission atomic. Settled positions require separate settlement accounting review and are not automatically recycled. One contract per race remains the default; the optional reviewed multi-contract mode uses gross exposure and shared race controls. Different races can still be correlated.
 
@@ -210,6 +210,7 @@ For additional races, configure precise state/office/district phrases and review
 - SIG has no documented immediate-or-cancel field. The bot submits a short-expiry limit order, promptly cancels a resting remainder, and checks that it closed. Expiration is a backstop, not proof that cancellation worked.
 - A write timeout, unexpected response or uncertain cancellation halts execution with the reservation intact. Known bot orders can be reconciled on restart. Unknown submissions are never retried under a new key.
 - After the original expiration plus five seconds, use `python3 -m election_bot recover`. It replays the exact stored request/key if necessary, then checks/cancels the known order. If the exchange still cannot determine the status, the bot stays halted; check the SIG account/API response before doing anything else. This command works even with a stop signal set.
+- SIG can reject an expired recovery replay with `expirationDate must be in the future.` Explicit `recover` then has a narrow fallback after expiration plus 90 seconds: it checks complete, checkpoint-consistent exchange order history and matching account inventory twice. Every remote order must already be accounted for locally, and every locally acknowledged order must appear with matching terms and fills. Only then does it atomically record the evidence and release the unused reservation as a zero fill. Unknown orders, missing history, changed fills, inventory differences, other HTTP errors or incomplete projections retain the reservation. It never extends the expiration, invents an order ID or replaces the idempotency key. Normal running and the watcher do not invoke this fallback automatically.
 - Missing timestamps, closed markets, changed rules, thin/crossed books and external-venue disagreement prevent trades.
 - SIG reads returning HTTP 502, 503 or 504 are tried up to three times with short delays. During continuous running, transient GET failures that escape a scan (network errors or HTTP 408/429/500/502/503/504) log `connection_pause` and retry with delays of 5, 10, 20, 40, then 60 seconds, honoring any longer server-requested delay. No new orders are submitted during the pause; each resumed cycle reconciles pending orders before scanning. Recovery logs `connection_restored`. Market-specific metadata/book failures can skip that race. Authentication, inconsistent fills, unknown submissions and failed writes still halt with reservations intact. This recovery never automatically replays order submissions. Continuous startup also retries transient tournament connection failures, logging `startup_connection_pause` until connected or stopped. Certificate verification errors remain explicit failures; TLS verification is never disabled. `--once` and utility commands still exit on unrecovered read failures. Ctrl-C and the stop signal interrupt recovery waits.
 - Any existing open tournament order blocks new bot entries. Only orders recorded as this bot's own are cancelled. Avoid trading the same account from another process while this one runs: the API does not provide an atomic account lock.
@@ -232,7 +233,7 @@ Use `python3 -m election_bot watch --live` instead of `run --live` to supervise 
 
 Ctrl+C, `stop`, normal completion, and known accounting, database, authentication, hard clock or risk halts do not auto-restart. Temporary API read outages already retry within the worker. Keep the terminal session running and the Mac awake; this is not a login/background service. `status` includes the watcher's last recorded state, which is not a liveness check. See [supervision behavior](docs/automatic-recovery.md).
 
-Slow or expired SIG clock samples now cause `clock_pause` and fresh-cycle retries rather than terminating continuous execution. Genuine clock jumps, invalid evidence and definite excessive offsets still halt. See [clock verification and recovery](docs/clock-and-reference-workers.md).
+Slow, expired or wall/monotonic-discontinuous SIG clock samples cause `clock_pause` and fresh-cycle retries rather than terminating continuous execution. Clock adjustments and suspend/resume require a new timing sample; the old sample is never accepted or refreshed. Invalid numeric evidence and definite excessive offsets on fresh consistent evidence still halt. See [clock verification and recovery](docs/clock-and-reference-workers.md).
 
 
 ### Review fixes and event retention
@@ -244,3 +245,7 @@ The inventory-aware engine checks exposure metadata for existing local holdings 
 Disabled news mappings can still protect held contracts: disputed-result ingestion now records their persistent dispute without rolling back the feed. Mapping-name and exchange-based dispute checks remain active.
 
 Old high-volume diagnostic events are preserved in compressed archives before removal from the active SQLite journal. See [event retention](docs/event-retention.md) for the seven-day hot window, reporting limitations and failure guarantees.
+
+### Independent fair-value research
+
+`python3 -m election_bot fair-value --demo` demonstrates an independent polling model without real data or trades. `fair-value --seed-public` imports a dated, source-checked New Hampshire Senate pilot; `fair-value` reports estimates and forward price comparisons. After restart, ordinary scans record research proposals alongside the current market strategy. The model cannot place trades, and its provisional probabilities are not calibrated. Public feed staging and versioned evidence imports are available; see [independent fair-value research](docs/independent-fair-value.md) for commands, source limitations and the remaining work.

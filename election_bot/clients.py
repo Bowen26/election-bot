@@ -36,12 +36,14 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class APIError(RuntimeError):
-    def __init__(self, message, status=None, retry_after=None, method=None, venue=None):
+    def __init__(self, message, status=None, retry_after=None, method=None, venue=None,
+                 rejection=None):
         super().__init__(message)
         self.status = status
         self.retry_after = retry_after
         self.method = method
         self.venue = venue
+        self.rejection = rejection
 
 
 class HTTP:
@@ -108,6 +110,16 @@ class HTTP:
                 return result
         except urllib.error.HTTPError as error:
             # Response bodies can contain user data; never log them or the key.
+            rejection = None
+            if self.venue == 'SIG' and method == 'POST' and path == '/orders' and error.code == 400:
+                try:
+                    body = error.read(16385)
+                    detail = json.loads(body).get('error', {}) if len(body) <= 16384 else {}
+                    if (isinstance(detail, dict) and detail.get('code') == 'VALIDATION_ERROR'
+                            and detail.get('message') == 'expirationDate must be in the future.'):
+                        rejection = 'expired_order'
+                except (ValueError, TypeError, AttributeError, OSError):
+                    pass
             retry_after = None
             header = error.headers.get('Retry-After') if error.headers else None
             if header:
@@ -120,7 +132,8 @@ class HTTP:
                         pass
             suffix = '; mutation status must be reconciled' if method != 'GET' else ''
             raise APIError("{} {} returned HTTP {}{}".format(method, path, error.code, suffix),
-                           status=error.code, retry_after=retry_after, method=method, venue=self.venue) from None
+                           status=error.code, retry_after=retry_after, method=method, venue=self.venue,
+                           rejection=rejection) from None
         except (urllib.error.URLError, TimeoutError, OSError) as error:
             reason = getattr(error, 'reason', error)
             # Diagnose common transport failures without logging URLs, headers or credentials.
@@ -196,6 +209,38 @@ class Sig:
 
     def open_orders(self):
         return self.collection('/orders', {'status': 'open', 'tournamentId': self.tid})
+
+    def recovery_history(self, exchange):
+        """Complete, checkpoint-consistent history; stricter than display listings."""
+        params = {'status': 'all', 'tournamentId': self.tid, 'exchangeId': str(exchange), 'limit': 100}
+        rows, ids, cursors, checkpoint = [], set(), set(), None
+        for _ in range(100):
+            page = self.read('/orders', params=dict(params))
+            coverage = page.get('coverage', {})
+            sequence = coverage.get('projectedThroughSequence')
+            if (coverage.get('complete') is not True or type(sequence) is not int or sequence < 0
+                    or (checkpoint is not None and sequence != checkpoint)):
+                raise RuntimeError('Order recovery history coverage/checkpoint unverified; reservation retained')
+            checkpoint = sequence
+            if not isinstance(page.get('data'), list):
+                raise RuntimeError('Malformed recovery history; reservation retained')
+            for row in page['data']:
+                oid = str(row['id'])
+                if (oid in ids or str(row['exchangeId']) != str(exchange)
+                        or row['tournamentId'] != self.tid):
+                    raise RuntimeError('Recovery history identity mismatch; reservation retained')
+                ids.add(oid)
+                rows.append(row)
+            pagination = page['pagination']
+            if pagination.get('hasMore') is False:
+                self.check_clock()
+                return {'orders': rows, 'sequence': checkpoint}
+            cursor = pagination.get('nextCursor')
+            if pagination.get('hasMore') is not True or not isinstance(cursor, str) or not cursor or cursor in cursors:
+                raise RuntimeError('Incomplete recovery pagination; reservation retained')
+            cursors.add(cursor)
+            params['cursor'] = cursor
+        raise RuntimeError('Recovery history pagination limit exceeded; reservation retained')
 
     def positions(self):
         return self.read('/tournaments/' + self.slug + '/portfolio/positions')['positions']

@@ -24,13 +24,47 @@ class TimingClassificationTests(unittest.TestCase):
         with self.assertRaises(ClockSampleUnavailable) as e:check_timing(timing(),T+20,M+20)
         self.assertGreater(e.exception.detail['sample_age_seconds'],15)
 
-    def test_slow_sample_never_masks_clock_jump_or_definite_skew(self):
-        samples=[dict(timing(),received_at=T+10,received_monotonic=M+6),
-                 dict(timing(30),received_at=T+6,received_monotonic=M+6)]
-        for s in samples:
-            with self.subTest(sample=s),self.assertRaises(ClockCheckError) as e:
-                check_timing(s,s['received_at']+.1,M+6.1)
-            self.assertNotIsInstance(e.exception,ClockSampleUnavailable)
+    def test_slow_sample_detects_discontinuity_before_using_its_offset(self):
+        s=dict(timing(),received_at=T+10,received_monotonic=M+6)
+        with self.assertRaises(ClockSampleUnavailable) as e:
+            check_timing(s,s['received_at']+.1,M+6.1)
+        self.assertEqual(e.exception.detail['reason_code'],'clock_discontinuity')
+        self.assertEqual(e.exception.detail['request_clock_difference_seconds'],4)
+
+    def test_slow_stable_sample_never_masks_definite_skew(self):
+        s=dict(timing(30),received_at=T+6,received_monotonic=M+6)
+        with self.assertRaises(ClockCheckError) as e:check_timing(s,T+6.1,M+6.1)
+        self.assertNotIsInstance(e.exception,ClockSampleUnavailable)
+
+    def test_clock_adjustment_requires_new_sample_then_rechecks_actual_skew(self):
+        original=timing()
+        for jump in (-300,300):
+            with self.subTest(jump=jump):
+                for _ in range(2):
+                    with self.assertRaises(ClockSampleUnavailable) as caught:
+                        check_timing(original,T+.3+jump,M+.3)
+                    self.assertEqual(caught.exception.detail['reason_code'],'clock_discontinuity')
+                fresh=dict(timing(),request_started_at=T+jump,received_at=T+jump+.2,
+                           http_date_at=T+jump)
+                self.assertEqual(check_timing(fresh,T+jump+.3,M+.3)['status'],'verified')
+                # A fresh stable clock still 30 seconds off the server stays halted.
+                fresh['http_date_at'] += 30
+                with self.assertRaises(ClockCheckError) as caught:
+                    check_timing(fresh,T+jump+.3,M+.3)
+                self.assertNotIsInstance(caught.exception,ClockSampleUnavailable)
+        self.assertEqual(original,timing())
+
+    def test_discontinuity_blocks_POST_until_fresh_timing_replaces_old_sample(self):
+        sig=Sig.__new__(Sig);sig.tid='test';sig.http=Mock()
+        sig.http.last_timing=timing()
+        payload={'tournamentId':'test'}
+        with patch('election_bot.clock_guard.time.time',return_value=T+300.3), \
+             patch('election_bot.clock_guard.time.monotonic',return_value=M+.3):
+            with self.assertRaises(SubmissionClockUnavailable):sig.place(payload)
+            sig.http.request.assert_not_called()
+            sig.http.last_timing=dict(timing(),request_started_at=T+300,received_at=T+300.2,http_date_at=T+300)
+            sig.place(payload)
+            sig.http.request.assert_called_once_with('/orders','POST',payload=payload)
 
     def test_negative_timing_and_boundary_remain_hard_halts(self):
         for s in [dict(timing(),cache_age_seconds=-1),dict(timing(),received_monotonic=M-1),timing(5)]:
@@ -69,6 +103,15 @@ class ClockLoopTests(unittest.TestCase):
         e=self.engine([ClockSampleUnavailable('slow')]*6)
         with patch('election_bot.runner.wait',side_effect=[True]*5+[False]) as wait:run_loop(e)
         self.assertEqual([c.args[1] for c in wait.call_args_list],[5,10,20,40,60,60])
+        self.assertNotIn('clock_recovered',[c.args[0] for c in e.report.call_args_list])
+
+    def test_discontinuity_pauses_then_fresh_definite_skew_halts(self):
+        try:check_timing(timing(),T+300.3,M+.3)
+        except ClockSampleUnavailable as error:jump=error
+        e=self.engine([jump,ClockCheckError('Local clock differs from SIG')])
+        with patch('election_bot.runner.wait',return_value=True) as wait:
+            with self.assertRaisesRegex(ClockCheckError,'differs from SIG'):run_loop(e)
+        wait.assert_called_once_with(e,5)
         self.assertNotIn('clock_recovered',[c.args[0] for c in e.report.call_args_list])
 
     def test_once_and_hard_clock_errors_still_raise(self):
