@@ -13,7 +13,8 @@ from election_bot import __main__ as cli
 from election_bot.clients import APIError
 from election_bot.clock_guard import ClockCheckError
 from election_bot.state import exclusive_lock
-from election_bot.supervisor import failure_code, restartable, stop_child, watch, HALT, RETRY
+from election_bot.supervisor import failure_code, restartable, stop_child, watch, HALT, RETRY, RECOVER
+from election_bot.recovery_wait import UnresolvedOrderError
 
 
 class FakeClock:
@@ -57,6 +58,55 @@ class SupervisorTests(unittest.TestCase):
 
     def test_default_stays_paper(self):
         _,children=self.run_watch([0]);self.assertNotIn('--live',children[0][1][0])
+
+    def test_mutation_timeout_runs_recovery_before_resuming_live_worker(self):
+        code,children=self.run_watch([RECOVER,0,0],live=True)
+        self.assertEqual(code,0)
+        self.assertEqual([c[1][0][-2:] for c in children],
+                         [['run','--live'],['recover','--wait'],['run','--live']])
+        self.assertIn('recovered',[json.loads(s)['status'] for s in self.messages])
+        self.assertEqual(self.status()['restarts'],1)
+
+    def test_recovery_read_failure_retries_recovery_not_trading(self):
+        code,children=self.run_watch([RECOVER,RETRY,0,0],live=True)
+        self.assertEqual(code,0)
+        self.assertEqual([c[1][0][-2:] for c in children],
+                         [['run','--live'],['recover','--wait'],['recover','--wait'],['run','--live']])
+
+    def test_recovery_hard_halt_does_not_launch_trading(self):
+        code,children=self.run_watch([RECOVER,HALT],live=True)
+        self.assertEqual(code,HALT);self.assertEqual(len(children),2)
+        self.assertEqual(self.status()['status'],'halted')
+        self.assertNotIn('recovered',[json.loads(s)['status'] for s in self.messages])
+
+    def test_paper_mode_never_launches_live_recovery(self):
+        code,children=self.run_watch([RECOVER])
+        self.assertEqual(code,RECOVER);self.assertEqual(len(children),1)
+
+    def test_recovery_retry_budget_is_bounded_and_sets_STOP(self):
+        code,children=self.run_watch([RECOVER]*4,live=True)
+        self.assertEqual(code,HALT);self.assertEqual(len(children),4)
+        self.assertTrue((self.runtime/'STOP').exists())
+        self.assertTrue(all(c[1][0][-2:]==['recover','--wait'] for c in children[1:]))
+
+    def test_STOP_after_successful_recovery_prevents_trading_restart(self):
+        def report(message):
+            self.messages.append(message)
+            if json.loads(message)['status']=='recovered':(self.runtime/'STOP').touch()
+        with patch('election_bot.supervisor.time',self.clock), \
+             patch('election_bot.supervisor.subprocess.Popen',side_effect=[Process(RECOVER),Process(0)]) as launch:
+            self.assertEqual(watch(self.root,self.runtime,self.config,live=True,report=report),0)
+        self.assertEqual(launch.call_count,2)
+
+    def test_SIG_mutation_uncertainty_has_separate_recovery_code(self):
+        for method in ('POST','DELETE'):
+            for status in (None,408,500,502,503,504):
+                with self.subTest(method=method,status=status):
+                    self.assertEqual(failure_code(APIError('uncertain',method=method,status=status,venue='SIG')),RECOVER)
+        self.assertEqual(failure_code(UnresolvedOrderError('unknown')),RECOVER)
+        for status in (400,401,403,409,429):
+            self.assertEqual(failure_code(APIError('halt',method='POST',status=status,venue='SIG')),HALT)
+        self.assertEqual(failure_code(APIError('later',method='POST',status=503,venue='SIG',retry_after=120)),HALT)
 
     def test_no_restart_for_clean_stop_interrupt_or_operational_halt(self):
         for code in [0,130,HALT,2,-signal.SIGINT,-signal.SIGTERM,-signal.SIGHUP]:

@@ -11,6 +11,7 @@ from .news import validate_news
 from .scanner import Scanner
 from .profit_exit import profit_exit_mode
 from .clock_guard import ClockSampleUnavailable, SubmissionClockUnavailable
+from .recovery_wait import UnresolvedOrderError
 
 
 def validate_config(config):
@@ -166,10 +167,12 @@ class Engine:
             response = json.loads(row['response']) if row['response'] else None
             if response is None:
                 if not replay_unknown:
-                    raise RuntimeError('Unknown order status. Run recover after its expiration; no new trades allowed.')
+                    raise UnresolvedOrderError('Unknown order status. Run recover after its expiration; no new trades allowed.')
                 if time.time() < iso_time(payload['expirationDate']) + 5:
                     raise RuntimeError('Wait until original order expiration plus five seconds before recover')
                 # Identical payload/key only. Never refresh the expiration or create a retry key.
+                if getattr(self, 'recovery_stop_guard', False) and self.stopped():
+                    raise KeyboardInterrupt
                 try:
                     response = self.sig.place(payload)
                 except APIError as error:

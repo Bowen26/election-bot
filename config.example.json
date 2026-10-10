@@ -113,5 +113,8 @@
       "remaining_gap": "0.02",
       "partial_fraction": "0.25"
     }
+  },
+  "research_polling": {
+    "enabled": false
   }
 }

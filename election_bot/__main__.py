@@ -83,7 +83,9 @@ def main():
     run.add_argument('--once', action='store_true')
     watch = sub.add_parser('watch', help='Run with bounded automatic crash recovery; honors STOP')
     watch.add_argument('--live', action='store_true', help='Supervise live SIG competition trading')
-    sub.add_parser('recover', help='Reconcile live pending orders; replay unknown requests only after expiration')
+    recover = sub.add_parser('recover', help='Reconcile live pending orders; replay unknown requests only after expiration')
+    recover.add_argument('--wait', action='store_true',
+                         help='Wait past expiration and refresh SIG timing; honors STOP (used by watch --live)')
     sub.add_parser('stop', help='Write the stop signal; does not liquidate holdings')
     sub.add_parser('resume', help='Clear the stop signal; does not launch the bot')
     sub.add_parser('status', help='Read local spending and pending-order status')
@@ -108,6 +110,8 @@ def main():
     action.add_argument('--import-json', type=Path, help='Import verified polling evidence with local receipt timestamps')
     action.add_argument('--seed-public', action='store_true', help='Import the dated, source-checked NH Senate pilot; no model trades')
     action.add_argument('--fetch-public', action='store_true', help='Stage public polling feed for review; never auto-import')
+    action.add_argument('--collect-public', action='store_true', help='Collect VoteHub research inputs once; no orders')
+    action.add_argument('--collector-status', action='store_true', help='Show public polling collection health')
     action.add_argument('--template', type=Path, help='Write a draft for up to ten configured Senate contracts')
     action.add_argument('--demo', action='store_true', help='Run a synthetic offline fair-value comparison')
     fair.add_argument('--paper', action='store_true')
@@ -311,6 +315,7 @@ def main():
             journal = Journal(RUNTIME / ('live.sqlite3' if live else 'paper.sqlite3'), binding)
             engine = None
             news = None
+            polls = None
             try:
                 if args.command != 'recover' and config.get('news', {}).get('enabled'):
                     news = NewsGate(config, RUNTIME, ('live:' if live else 'paper:') + sig.tid)
@@ -321,14 +326,32 @@ def main():
                     engine_class = ActiveEngine
                 engine = engine_class(config, sig, refs, journal, RUNTIME, live=live, news=news)
                 if args.command == 'recover':
+                    if args.wait:
+                        from .recovery_wait import prepare_recovery
+                        if not prepare_recovery(engine):
+                            raise KeyboardInterrupt
+                        engine.recovery_stop_guard = True
                     engine.reconcile(replay_unknown=True)
                     output(journal.summary())
                     return
+                if not args.once and config.get('research_polling', {}).get('enabled') is True:
+                    try:
+                        from .poll_collector import PollCollector
+                        polls = PollCollector(RUNTIME, config)
+                        polls.start()
+                    except Exception as poll_error:
+                        polls = None
+                        print('Polling research worker unavailable: ' + type(poll_error).__name__, file=sys.stderr)
                 print('LIVE SIG COMPETITION EXECUTION — automatic orders' if live else 'PAPER SIMULATION — no orders submitted', flush=True)
                 from .runner import run_loop
                 run_loop(engine, once=args.once, news=news)
             finally:
                 original_error = sys.exc_info()[0] is not None
+                if polls:
+                    try:
+                        polls.close()
+                    except Exception as poll_error:
+                        print('Polling research shutdown error: ' + type(poll_error).__name__, file=sys.stderr)
                 try:
                     if engine is not None:
                         try:

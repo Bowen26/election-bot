@@ -1,4 +1,4 @@
-"""Bounded terminal supervision; never clears STOP or replays uncertain writes."""
+"""Bounded terminal supervision with verified recovery before resuming trades."""
 from collections import deque
 from contextlib import contextmanager
 import json
@@ -14,18 +14,25 @@ from .clients import APIError
 from .clock_guard import ClockSampleUnavailable
 from .runner import transient_read
 from .state import exclusive_lock
+from .recovery_wait import UnresolvedOrderError
 
 HALT = 78
 RETRY = 75
+RECOVER = 76
 WINDOW_SECONDS = 900
 MAX_RESTARTS = 3
 
 
 def failure_code(error):
-    """Known operational/safety errors need attention; only unknown crashes retry."""
+    """Separate uncertain mutations from read retries and hard safety halts."""
+    if isinstance(error, UnresolvedOrderError):
+        return RECOVER
     if isinstance(error, ClockSampleUnavailable):
         return RETRY
     if isinstance(error, APIError):
+        if (error.venue == 'SIG' and error.method in ('POST', 'DELETE')
+                and error.status in (None, 408, 500, 502, 503, 504) and not error.retry_after):
+            return RECOVER
         # In-process retries honor Retry-After. An escaped rate-limit error
         # cannot carry that delay through an exit code, so do not bypass it.
         return RETRY if transient_read(error) and error.status != 429 and not error.retry_after else HALT
@@ -82,6 +89,9 @@ def watch(root, runtime, config, live=False, report=print):
     command = [sys.executable, '-u', '-m', 'election_bot', '--config', str(Path(config).resolve()), 'run']
     if live:
         command.append('--live')
+    recovery_command = [sys.executable, '-u', '-m', 'election_bot', '--config',
+                        str(Path(config).resolve()), 'recover', '--wait']
+    mode = 'run'
     stop = runtime / 'STOP'
     child = None
     restarts = deque()
@@ -90,7 +100,7 @@ def watch(root, runtime, config, live=False, report=print):
     def state(status, **extra):
         payload = {'event': 'supervisor', 'status': status, 'at': time.time(),
                    'supervisor_pid': os.getpid(), 'child_pid': child.pid if child else None,
-                   'live': live, 'restarts': total_restarts, **extra}
+                   'live': live, 'restarts': total_restarts, 'mode': mode, **extra}
         temporary = directory / 'status.json.tmp'
         with temporary.open('w') as handle:
             os.chmod(temporary, 0o600)
@@ -110,8 +120,9 @@ def watch(root, runtime, config, live=False, report=print):
                 pass
             while not stop.exists():
                 started = time.monotonic()
-                child = subprocess.Popen(command, cwd=str(root), start_new_session=True)
-                state('running')
+                child = subprocess.Popen(recovery_command if mode == 'recover' else command,
+                                         cwd=str(root), start_new_session=True)
+                state('recovering' if mode == 'recover' else 'running')
                 while child.poll() is None and not stop.exists():
                     time.sleep(.25)
                 if stop.exists():
@@ -119,7 +130,12 @@ def watch(root, runtime, config, live=False, report=print):
                     state('stopped', reason='STOP is set')
                     return 0
                 code = child.returncode
-                if not restartable(code):
+                if mode == 'recover' and code == 0:
+                    state('recovered', reason='Reconciliation succeeded; restarting normal trading')
+                    mode = 'run'
+                    continue
+                needs_recovery = live and code == RECOVER
+                if not restartable(code) and not needs_recovery:
                     intentional = code in (0,130,-signal.SIGINT,-signal.SIGTERM,-signal.SIGHUP)
                     state('stopped' if intentional else 'halted', exit_code=code,
                           reason='Worker exited; no automatic restart for this exit code')
@@ -133,6 +149,8 @@ def watch(root, runtime, config, live=False, report=print):
                     state('halted', exit_code=code, reason='Restart limit reached; STOP set for review')
                     return HALT
                 delay = min(60,5*2**len(restarts))
+                if needs_recovery:
+                    mode = 'recover'
                 state('restart_wait', exit_code=code, retry_in_seconds=delay,
                       worker_uptime_seconds=round(now-started,1))
                 deadline = time.monotonic()+delay

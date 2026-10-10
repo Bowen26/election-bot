@@ -76,6 +76,12 @@ def run(args, runtime, config):
         store=PollStore(Path(runtime)/'fair-value.sqlite3')
         try:return dict(store.ingest(data,config),pilot='NH Senate',automatic_feed=False,live_model_orders=False)
         finally:store.close()
+    if getattr(args, 'collect_public', False):
+        from .poll_collector import collect
+        return collect(runtime, config, force=True, stopped=lambda: (Path(runtime)/'STOP').exists())
+    if getattr(args, 'collector_status', False):
+        from .poll_collector import status
+        return status(runtime)
     if args.fetch_public:
         from .poll_sources import stage_public
         return stage_public(runtime)
