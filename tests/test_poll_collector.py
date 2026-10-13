@@ -99,11 +99,67 @@ class AdapterTests(unittest.TestCase):
 
     def test_only_enabled_signed_exact_office_bound(self):
         c=config()
-        for field, value in [('enabled',False), ('office','governor'), ('exposure_sign',True), ('race_key','2026:senate:MA')]:
+        for field, value in [('enabled',False), ('office','governor'), ('exposure_sign',True), ('race_key','2026:senate:UNREVIEWED')]:
             bad=copy.deepcopy(c); bad['markets'][0][field]=value
             self.assertEqual(bindings(bad), [])
         c['markets'][0]['exposure_sign']=-1
         self.assertEqual(bindings(c)[0]['yes_party'], 'REP')
+
+
+class ExpandedCoverageTests(unittest.TestCase):
+    def test_new_races_bind_both_party_orientations_and_normalize(self):
+        examples = [('Michigan','MI','Abdul El-Sayed','Mike Rogers'),
+                    ('Ohio','OH','Sherrod Brown','Jon Husted'),
+                    ('Texas','TX','James Talarico','Ken Paxton')]
+        for name, state, dem, rep in examples:
+            for sign, party in [(1,'DEM'),(-1,'REP')]:
+                with self.subTest(state=state, party=party):
+                    c=config();m=c['markets'][0]
+                    m.update(race_key='2026:senate:'+state,exposure_sign=sign)
+                    data,rejected=adapt([row(subject='2026 '+name,answers=[
+                        dict(choice=dem,pct=51),dict(choice=rep,pct=45)])],c,{},T)
+                    self.assertEqual(rejected,[])
+                    self.assertEqual(data['races'][0]['yes_party'],party)
+                    self.assertEqual(data['races'][0]['contract_fingerprint'],m['contract_fingerprint'])
+                    self.assertEqual(data['polls'][0]['race_key'],m['race_key'])
+                    with tempfile.TemporaryDirectory() as root:
+                        store=PollStore(Path(root)/'fair-value.sqlite3')
+                        try:self.assertEqual(store.ingest(data,c,T)['inserted_versions'],2)
+                        finally:store.close()
+
+    def test_old_nominees_primaries_and_unreviewed_seats_rejected(self):
+        c=config();c['markets'][0]['race_key']='2026:senate:TX'
+        valid=row(subject='2026 Texas',answers=[dict(choice='James Talarico',pct=51),dict(choice='Ken Paxton',pct=45)])
+        for changes in [dict(subject='2026 Texas Republican'),dict(seat_name='Special'),
+                        dict(answers=[dict(choice='James Talarico',pct=51),dict(choice='John Cornyn',pct=45)])]:
+            data,rejected=adapt([dict(valid,**changes)],c,{},T)
+            self.assertEqual(data['polls'],[])
+            self.assertEqual(len(rejected),1)
+
+    def test_runoff_ranked_choice_and_independent_contests_stay_unreviewed(self):
+        for state,name in [('GA','Georgia'),('ME','Maine'),('AK','Alaska'),('NE','Nebraska'),('KS','Kansas')]:
+            c=config();c['markets'][0]['race_key']='2026:senate:'+state
+            data,rejected=adapt([row(subject='2026 '+name)],c,{},T)
+            self.assertEqual(data['races'],[])
+            self.assertEqual(data['polls'],[])
+            self.assertEqual(rejected[0]['reason'],'unreviewed_race_or_stage')
+
+    def test_yougov_joint_release_is_same_family_not_an_extra_pollster(self):
+        joint='University of Massachusetts Lowell Center for Public Opinion/YouGov'
+        data,rejected=adapt([row(id='original'),row(id='joint',pollster=joint)],config(),{},T)
+        self.assertEqual(len(data['polls']),1)
+        self.assertEqual(data['polls'][0]['pollster'],'yougov')
+        self.assertEqual(len(rejected),1)
+        # Conflicting shares under a partner label also cannot evade quarantine.
+        data,rejected=adapt([row(),row(id='joint',pollster=joint,sample_size=999)],config(),{},T)
+        self.assertEqual(data['polls'],[])
+        self.assertEqual(len(rejected),2)
+
+    def test_new_binding_does_not_bypass_disabled_contract(self):
+        c=config();c['markets'][0].update(race_key='2026:senate:OH',enabled=False)
+        data,rejected=adapt([row(subject='2026 Ohio')],c,{},T)
+        self.assertEqual(data['races'],[])
+        self.assertEqual(rejected[0]['reason'],'no_enabled_bound_contract')
 
 
 class CollectorTests(unittest.TestCase):

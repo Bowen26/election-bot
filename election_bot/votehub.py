@@ -12,6 +12,15 @@ from .polling import digest, number, source_url, text, validate_poll
 
 ATTRIBUTION = 'VoteHub (https://votehub.com/polls/api/), CC BY 4.0; normalized for research'
 CATALOG = {
+    '2026 Michigan': dict(state='MI', dem='Abdul El-Sayed', rep='Mike Rogers',
+        dem_aliases=('Abdul El-Sayed',), rep_aliases=('Mike Rogers',), zone='America/Detroit',
+        source='https://emersoncollegepolling.com/michigan-2026-poll-el-sayed-and-rogers-locked-in-close-election/'),
+    '2026 Ohio': dict(state='OH', dem='Sherrod Brown', rep='Jon Husted',
+        dem_aliases=('Sherrod Brown',), rep_aliases=('Jon Husted',), zone='America/New_York',
+        source='https://battlegrounds.coefficient.org/oh/'),
+    '2026 Texas': dict(state='TX', dem='James Talarico', rep='Ken Paxton',
+        dem_aliases=('James Talarico',), rep_aliases=('Ken Paxton',), zone='America/Chicago',
+        source='https://www.uml.edu/news/press-releases/2026/10092026-texas-poll.aspx'),
     '2026 New Hampshire': dict(state='NH', dem='Chris Pappas', rep='John E. Sununu',
         dem_aliases=('Chris Pappas',), rep_aliases=('John Sununu', 'John E. Sununu'),
         zone='America/New_York', source='https://scholars.unh.edu/survey_center_polls/1005/'),
@@ -24,6 +33,7 @@ CATALOG = {
 }
 # New labels require panel-family review instead of manufacturing independence.
 POLLSTERS = {name.casefold(): family for name, family in (
+    ('University of Massachusetts Lowell Center for Public Opinion/YouGov', 'yougov'),
     ('YouGov', 'yougov'), ('Emerson College', 'emerson college'),
     ('The New York Times/Siena University', 'siena university'),
     ('University of New Hampshire', 'university of new hampshire'),

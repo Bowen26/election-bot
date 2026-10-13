@@ -61,6 +61,9 @@ def demo():
 
 def run(args, runtime, config):
     if args.demo:return demo()
+    if getattr(args, 'seed_fundamentals', False):
+        from .fundamentals import seed
+        return seed(runtime, config)
     if args.seed_public:
         data=read_input(Path(__file__).resolve().parent.parent/'data/research/nh-senate-2026-10-08.json')
         eligible=[m for m in config['markets'] if m.get('enabled') and m.get('race_key')=='2026:senate:NH'

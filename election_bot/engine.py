@@ -15,6 +15,8 @@ from .recovery_wait import UnresolvedOrderError
 
 
 def validate_config(config):
+    from .model_live import settings as model_settings
+    model_settings(config)
     execution = config.get('execution', {})
     if execution.get('enabled'):
         if type(execution.get('priority_scanning', True)) is not bool:

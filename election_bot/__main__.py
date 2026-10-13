@@ -105,11 +105,18 @@ def main():
     exits.add_argument('--paper', action='store_true')
     exits.add_argument('--json', action='store_true')
     exits.add_argument('--hours', type=float, default=24)
+    low = sub.add_parser('low-price-study', help='Replay low-price target/trailing exits from recorded quotes; no orders')
+    low.add_argument('--paper', action='store_true')
+    low.add_argument('--json', action='store_true')
+    low.add_argument('--hours', type=float, default=24)
+    low.add_argument('--entry-mode', choices=('external_gap','sig_momentum','compare'), default='external_gap',
+                     help='Entry hypothesis to replay; compare runs both on the same recorded window')
     fair = sub.add_parser('fair-value', help='Independent polling research; cannot submit model trades')
     action = fair.add_mutually_exclusive_group()
     action.add_argument('--import-json', type=Path, help='Import verified polling evidence with local receipt timestamps')
     action.add_argument('--seed-public', action='store_true', help='Import the dated, source-checked NH Senate pilot; no model trades')
     action.add_argument('--fetch-public', action='store_true', help='Stage public polling feed for review; never auto-import')
+    action.add_argument('--seed-fundamentals', action='store_true', help='Add reviewed historical-lean priors for paired research; no trades')
     action.add_argument('--collect-public', action='store_true', help='Collect VoteHub research inputs once; no orders')
     action.add_argument('--collector-status', action='store_true', help='Show public polling collection health')
     action.add_argument('--template', type=Path, help='Write a draft for up to ten configured Senate contracts')
@@ -163,12 +170,15 @@ def main():
         result = report(config, RUNTIME, args.race)
         output(result) if args.json else print(format_report(result))
         return
-    if args.command in ('leadership', 'exit-study'):
-        if args.command == 'exit-study':
+    if args.command in ('leadership', 'exit-study', 'low-price-study'):
+        if args.command == 'low-price-study':
+            from .low_price import report, format_report
+        elif args.command == 'exit-study':
             from .exit_study import report, format_report
         else:
             from .leadership import report, format_report
-        result = report(RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3'), hours=args.hours)
+        options = {'entry_mode': args.entry_mode} if args.command == 'low-price-study' else {}
+        result = report(RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3'), hours=args.hours, **options)
         if args.json:
             output(result)
         else:

@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "dataset": "fec_presidential_2020_2024_initial_states_v1",
+  "states": [
+    "IA",
+    "NC",
+    "NH"
+  ],
+  "notes": "Selected raw Democratic and Republican candidate vote totals, transcribed from the cited FEC PDF versions. Not poll results or 2026 forecasts. Availability for use is assigned on local import. Historical national totals are the totals printed in these source versions, not numbers substituted from another publication.",
+  "elections": [
+    {
+      "year": 2020,
+      "source_url": "https://www.fec.gov/resources/cms-content/documents/2020presgeresults.pdf",
+      "dem_page": 2,
+      "rep_page": 8,
+      "dem_candidate": "Joseph R. Biden",
+      "rep_candidate": "Donald J. Trump",
+      "national": {
+        "dem": 81268924,
+        "rep": 74216154
+      },
+      "states": {
+        "IA": {
+          "dem": 759061,
+          "rep": 897672
+        },
+        "NH": {
+          "dem": 424937,
+          "rep": 365660
+        },
+        "NC": {
+          "dem": 2684292,
+          "rep": 2758775
+        }
+      }
+    },
+    {
+      "year": 2024,
+      "source_url": "https://www.fec.gov/resources/cms-content/documents/2024presgeresults.pdf",
+      "dem_page": 3,
+      "rep_page": 5,
+      "dem_candidate": "Kamala D. Harris",
+      "rep_candidate": "Donald J. Trump",
+      "national": {
+        "dem": 75017613,
+        "rep": 77302580
+      },
+      "states": {
+        "IA": {
+          "dem": 707278,
+          "rep": 927019
+        },
+        "NH": {
+          "dem": 418488,
+          "rep": 395523
+        },
+        "NC": {
+          "dem": 2715375,
+          "rep": 2898423
+        }
+      }
+    }
+  ],
+  "verified_on": "2026-10-11"
+}

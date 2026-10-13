@@ -8,6 +8,7 @@ import time
 from .fair_value import estimate, compare, VERSION
 from .polling import PollStore
 from .strategy import D
+from .fundamentals import variants
 
 
 def observe(runtime, mapping, book, refs, strategy, snapshot_id, now=None):
@@ -24,9 +25,12 @@ def observe(runtime, mapping, book, refs, strategy, snapshot_id, now=None):
         if race is None:return dict(base,status='unavailable',reason='no_reviewed_polling_mapping')
         if race['contract_fingerprint']!=mapping.get('contract_fingerprint') or race['race_key']!=mapping.get('race_key'):
             return dict(base,status='unavailable',reason='contract_binding_changed')
-        forecast=estimate(race,store.latest('poll',now),now)
+        polls=store.latest('poll',now)
+        forecast=estimate(race,polls,now)
+        alternatives={name:{'forecast':value,'comparison':compare(value,book,refs,strategy)}
+                      for name,value in variants(race,polls,now).items()}
         comparison=compare(forecast,book,refs,strategy)
-        return dict(base,status=forecast['status'],forecast=forecast,comparison=comparison,
+        return dict(base,status=forecast['status'],forecast=forecast,comparison=comparison,prior_variants=alternatives,
                     cost_buffer_per_share=str(strategy['cost_buffer_per_share']))
     except (ValueError,KeyError,TypeError,sqlite3.Error,OSError,ArithmeticError) as error:
         return dict(base,status='unavailable',reason='research_input_or_quote_error',error_type=type(error).__name__)
@@ -62,7 +66,8 @@ def report(runtime, config, paper=False, hours=24, now=None):
                 covered.add(race['sig_exchange_id'])
                 if any(race[k]!=mapping.get(k) for k in ('contract_fingerprint','race_key')):
                     result['forecasts'].append({'exchange':race['sig_exchange_id'],'status':'unavailable','reason':'contract_binding_changed'})
-                else:result['forecasts'].append(dict(estimate(race,polls,now),exchange=race['sig_exchange_id']))
+                else:result['forecasts'].append(dict(estimate(race,polls,now),exchange=race['sig_exchange_id'],
+                                                    prior_variants=variants(race,polls,now)))
         finally:store.close()
     result['coverage']={'enabled_contracts':len(mappings),'mapped_contracts':len(covered),
                         'unmapped_contracts':len(set(mappings)-covered)}
@@ -92,6 +97,10 @@ def report(runtime, config, paper=False, hours=24, now=None):
                 seen.add(sid);counters[event['status']]+=1
                 comparison=event.get('comparison',{})
                 candidates=[('model',r) for r in comparison.get('model',[]) if r['eligible']]
+                for name,variant in event.get('prior_variants',{}).items():
+                    if name not in ('neutral_prior','historical_lean'):continue
+                    if variant.get('forecast',{}).get('experiment')!='historical_lean_v1':continue
+                    candidates.extend((name,r) for r in variant.get('comparison',{}).get('model',[]) if r['eligible'])
                 market=comparison.get('market')
                 if market:candidates.append(('market',dict(market,ask=market['price'])))
                 start=starts.get(sid)
@@ -124,11 +133,15 @@ def report(runtime, config, paper=False, hours=24, now=None):
 
 
 def format_report(result):
-    lines=['FAIR VALUE RESEARCH — uncalibrated, no model orders',str(result['coverage'])]
+    lines=['FAIR VALUE RESEARCH — uncalibrated; this command submits no orders',str(result['coverage'])]
     for row in result['forecasts']:
         if row['status']=='estimated':
             lines.append(f"{row['exchange']}: YES {row['yes_probability']:.1%}; sensitivity {row['yes_low']:.1%}–{row['yes_high']:.1%}; {row['pollster_count']} pollsters")
         else:lines.append(f"{row['exchange']}: unavailable — {row['reason']}")
+        for name,variant in row.get('prior_variants',{}).items():
+            if variant['status']=='estimated':
+                lines.append(f"  {name}: YES {variant['yes_probability']:.1%}; D-R margin {variant['dem_margin_pp']:+.2f} pp")
+            else:lines.append(f"  {name}: unavailable — {variant['reason']}")
     lines.extend(['Recorded observations: '+str(result['events']), 'Forward one-share price scenarios: '+str(result['markouts']),
                   'Uncertainty range is a sensitivity scenario, not a confidence interval. Use --json for evidence and limitations.'])
     return '\n'.join(lines)

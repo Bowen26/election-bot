@@ -75,6 +75,9 @@ def validate_race(raw, mappings):
         timestamp(prior['published_at'])
         prior['method'] = text(prior['method'])
         r['prior'] = prior
+    if r.get('fundamentals_prior') is not None:
+        from .fundamentals import validate_prior
+        validate_prior(r['fundamentals_prior'], r['race_key'])
     return r
 
 

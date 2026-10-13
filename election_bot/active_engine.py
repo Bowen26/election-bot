@@ -35,6 +35,9 @@ class ActiveEngine(Engine):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.ledger = Ledger(self.journal)
+        from . import model_live
+        model_live.initialize(self.journal.db)
+        self.latest_model_context = None
         self.races = RaceGroups(self.config, self.journal.db)
         self.races.bind(self.journal.db)
         bind_exposure_modes(self.ledger, self.config)
@@ -208,7 +211,7 @@ class ActiveEngine(Engine):
         last = self.races.last_sale(self.ledger, exchange)
         return max(0, last+seconds-time.time()) if last else 0
 
-    def reserve_order(self, payload, reserve, account, positions, exit_reason=None, exit_epoch=None):
+    def reserve_order(self, payload, reserve, account, positions, exit_reason=None, exit_epoch=None, model_context=None):
         """Recheck local limits under the same write lock as the reservation."""
         def guard():
             self.ledger.inventory(refresh=True)  # Include any newly committed execution.
@@ -242,6 +245,22 @@ class ActiveEngine(Engine):
                     verify_account_inventory(self.ledger, positions)
                 if D(payload['quantity']) > exposure.headroom(exchange, payload['action'], payload['side']):
                     raise ReservationRejected('Exposure changed before reservation')
+            if exit_reason == 'model_fair_value':
+                from . import model_live
+                if model_context is None or payload['action'] != 'buy':
+                    raise ReservationRejected('Missing model decision context')
+                mapping, book, refs, strategy = model_context
+                if mapping['sig_exchange_id'] != exchange:
+                    raise ReservationRejected('Model exchange changed before reservation')
+                held, _ = self.held(exchange, positions)
+                limits = ({side: exposure.headroom(exchange, 'buy', side) for side in ('yes','no')}
+                          if exposure.enabled else None)
+                fresh, detail = model_live.propose(self.runtime, mapping, self.config, self.journal.db,
+                    book, refs, strategy, self.available(exchange, account), held, limits)
+                if (fresh is None or fresh.side != payload['side'] or fresh.price != D(payload['price'])
+                        or fresh.quantity < D(payload['quantity'])):
+                    raise ReservationRejected('Model changed or unavailable at reservation: '+detail.get('reason',''))
+                model_live.attach(self.journal.db, payload, mapping['race_key'], detail)
             loss = self.loss_status()
             if loss['realized_loss_stop_coins'] is not None and loss['net_realized_loss'] >= loss['realized_loss_stop_coins']:
                 raise RuntimeError('Realized loss limit reached before reservation')
@@ -332,6 +351,15 @@ class ActiveEngine(Engine):
             entry = None  # Never use a complement buy to close or flip inventory.
             diagnostics.append({'reason': 'opposite_inventory'})
         signal = exit_signal or entry
+        self.latest_model_context = None
+        if signal is None and not reentry_wait and self.config.get('model_trading',{}).get('enabled'):
+            from . import model_live
+            signal, model_detail = model_live.propose(self.runtime, mapping, self.config, self.journal.db,
+                book, refs, settings, self.available(exchange, account), held, side_limits)
+            self.journal.event('model_decision', {**model_detail, 'exchange': exchange,
+                               'snapshot_id': self.latest_snapshot_id, 'phase': phase})
+            if signal:
+                self.latest_model_context = (mapping, book, refs, settings)
         self.scan_interest.observe(mapping['name'], diagnostics, refs, settings, held)
         self.report('decision', {'exchange': exchange, 'race_key': self.races.race(exchange), 'held': held, 'available': self.available(exchange, account),
             'checks': diagnostics, 'exit_check': exit_check, 'phase': phase,
@@ -538,7 +566,7 @@ class ActiveEngine(Engine):
             reserve = signal.quantity * (signal.price + fee)
             try:
                 self.reserve_order(payload, reserve, account, positions, exit_reason=signal.reason,
-                                   exit_epoch=self.latest_exit_epoch)
+                                   exit_epoch=self.latest_exit_epoch, model_context=self.latest_model_context)
             except ReservationRejected as error:
                 self.report('skip', {'exchange': exchange, 'reason': str(error)})
                 continue

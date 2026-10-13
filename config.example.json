@@ -116,5 +116,20 @@
   },
   "research_polling": {
     "enabled": false
+  },
+  "model_trading": {
+    "enabled": false,
+    "acknowledge_uncalibrated": false,
+    "total": "1000",
+    "daily": "250",
+    "per_race": "250",
+    "per_order": "25",
+    "minimum_edge": ".08",
+    "max_shares": 50,
+    "depth_fraction": ".25",
+    "max_sig_spread": ".04",
+    "min_price": ".10",
+    "max_price": ".90",
+    "max_collector_age_seconds": 7200
   }
 }
