@@ -131,5 +131,38 @@
     "min_price": ".10",
     "max_price": ".90",
     "max_collector_age_seconds": 7200
+  },
+  "drawdown_control": {
+    "enabled": false,
+    "pause_coins": "2500",
+    "resume_coins": "1250",
+    "max_mark_age_seconds": 300,
+    "refresh_books_per_cycle": 8
+  },
+  "position_entry_guard": {
+    "enabled": false,
+    "window_seconds": 1800,
+    "sample_spacing_seconds": 60,
+    "max_sample_gap_seconds": 600,
+    "minimum_span_seconds": 120,
+    "decline": "0.02",
+    "recovery_distance": "0.01"
+  },
+  "risk_exit": {
+    "enabled": false,
+    "loss_per_share": ".05",
+    "partial_fraction": ".25",
+    "cooldown_seconds": 1800,
+    "window_seconds": 1800,
+    "sample_spacing_seconds": 60,
+    "max_sample_gap_seconds": 600,
+    "minimum_span_seconds": 120
+  },
+  "rotation_study": {
+    "enabled": false,
+    "partial_fraction": ".25",
+    "depth_fraction": ".25",
+    "minimum_improvement_fraction": ".03",
+    "cooldown_seconds": 1800
   }
 }

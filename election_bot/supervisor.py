@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 
-from .clients import APIError
+from .clients import APIError, RecoveryHistoryUnavailable
 from .clock_guard import ClockSampleUnavailable
 from .runner import transient_read
 from .state import exclusive_lock
@@ -25,7 +25,7 @@ MAX_RESTARTS = 3
 
 def failure_code(error):
     """Separate uncertain mutations from read retries and hard safety halts."""
-    if isinstance(error, UnresolvedOrderError):
+    if isinstance(error, (UnresolvedOrderError, RecoveryHistoryUnavailable)):
         return RECOVER
     if isinstance(error, ClockSampleUnavailable):
         return RETRY

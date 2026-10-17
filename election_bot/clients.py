@@ -46,6 +46,10 @@ class APIError(RuntimeError):
         self.rejection = rejection
 
 
+class RecoveryHistoryUnavailable(RuntimeError):
+    """Retry recovery with fresh history; never release an unverified reservation."""
+
+
 class HTTP:
     HOSTS = {'https://sig.thesuper.market/api/v1',
              'https://external-api.kalshi.com/trade-api/v2',
@@ -211,16 +215,19 @@ class Sig:
         return self.collection('/orders', {'status': 'open', 'tournamentId': self.tid})
 
     def recovery_history(self, exchange):
-        """Complete, checkpoint-consistent history; stricter than display listings."""
+        """Complete history with non-regressing projection coverage on every page."""
         params = {'status': 'all', 'tournamentId': self.tid, 'exchangeId': str(exchange), 'limit': 100}
         rows, ids, cursors, checkpoint = [], set(), set(), None
         for _ in range(100):
             page = self.read('/orders', params=dict(params))
             coverage = page.get('coverage', {})
             sequence = coverage.get('projectedThroughSequence')
+            # SIG documents this as the newest projected event at response time,
+            # not the cursor snapshot ID. It may advance while paging. Continue
+            # the opaque cursor unchanged; incomplete or regressing reads fail.
             if (coverage.get('complete') is not True or type(sequence) is not int or sequence < 0
-                    or (checkpoint is not None and sequence != checkpoint)):
-                raise RuntimeError('Order recovery history coverage/checkpoint unverified; reservation retained')
+                    or (checkpoint is not None and sequence < checkpoint)):
+                raise RecoveryHistoryUnavailable('Order recovery history coverage/checkpoint unverified; reservation retained')
             checkpoint = sequence
             if not isinstance(page.get('data'), list):
                 raise RuntimeError('Malformed recovery history; reservation retained')
@@ -433,15 +440,19 @@ class References:
         return books
 
 
-def contract_record(sig_market, mapping, metadata):
-    kalshi, poly, token = metadata
+def sig_contract_record(sig_market, mapping):
     exchanges = [x for x in sig_market['exchanges'] if str(x['id']) == mapping['sig_exchange_id']]
     if len(exchanges) != 1:
         raise ValueError("Exchange does not belong to SIG market")
-    return {'sig': {'id': sig_market['id'], 'title': sig_market['title'],
+    return {'id': sig_market['id'], 'title': sig_market['title'],
                     'exchange': mapping['sig_exchange_id'], 'option': exchanges[0]['option'],
                     'settlementDate': sig_market.get('settlementDate'),
-                    'resolution_tree': sig_market['resolution_tree']},
+                    'resolution_tree': sig_market['resolution_tree']}
+
+
+def contract_record(sig_market, mapping, metadata):
+    kalshi, poly, token = metadata
+    return {'sig': sig_contract_record(sig_market, mapping),
             'kalshi': {k: kalshi.get(k) for k in ('ticker', 'title', 'rules_primary', 'rules_secondary')},
             'polymarket': {k: poly.get(k) for k in ('id', 'question', 'description', 'conditionId')},
             'orientations': [mapping['kalshi_yes_matches_sig_yes'], mapping['polymarket_yes_matches_sig_yes']],

@@ -15,6 +15,14 @@ from .recovery_wait import UnresolvedOrderError
 
 
 def validate_config(config):
+    from .rotation import settings as rotation_settings
+    rotation_settings(config)
+    from .drawdown import settings as drawdown_settings
+    drawdown_settings(config)
+    from .position_guard import settings as position_guard_settings
+    position_guard_settings(config)
+    from .risk_exit import settings as risk_exit_settings
+    risk_exit_settings(config)
     from .model_live import settings as model_settings
     model_settings(config)
     execution = config.get('execution', {})

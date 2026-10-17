@@ -44,3 +44,7 @@ caffeinate -i python3 -m election_bot watch --live
 ```
 
 Start only one supervisor. A running Python worker must restart to load the code and configuration. This installation does not itself submit orders or restart the worker. To disable new model entries, set `model_trading.enabled` to false and restart; attribution and existing positions remain available for normal accounting and exits.
+
+## Measuring this pilot
+
+`python3 -m election_bot strategy-performance` separates confirmed model purchases, FIFO-attributed realized profit, remaining cost, pending reservations and unused pilot allowance from other entries. Use `--json` for per-race figures and full markout coverage. It also explains recent model blocks by scan/preflight phase. The [report methodology](strategy-performance.md) describes mixed-route inventory, cost assumptions and limitations. Running the report requires no worker restart.

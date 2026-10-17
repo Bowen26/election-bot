@@ -13,6 +13,14 @@ POLICY = {'years': [2020, 2024], 'cycle_weights': [.5, .5],
           'national_environment_pp': 0, 'incumbency_adjustment_pp': 0,
           'calibrated': False}
 DATA_PATH = Path(__file__).resolve().parent.parent/'data/research/fec-presidential-lean.json'
+EXPANDED_DATA_PATH = DATA_PATH.with_name('fec-presidential-lean-expanded.json')
+EXPANDED_STATES = ('MI', 'OH', 'TX')
+
+
+def reviewed_data(state):
+    # Keep the original dataset bytes/hash for previously imported NH/IA/NC priors.
+    # Additive coverage must not invalidate stored forecasts or refresh availability.
+    return read_input(EXPANDED_DATA_PATH if state in EXPANDED_STATES else DATA_PATH)
 
 
 def margin(votes):
@@ -24,7 +32,7 @@ def margin(votes):
 
 def build_prior(state, available_at, data=None):
     """A deliberately weak, uncalibrated transfer from presidential to Senate lean."""
-    data = read_input(DATA_PATH) if data is None else data
+    data = reviewed_data(state) if data is None else data
     timestamp(available_at)
     if data.get('schema_version') != 1 or state not in data['states']:
         raise ValueError('Unsupported historical state data')
@@ -78,9 +86,9 @@ def seed(runtime, config, now=None):
                 raise ValueError('Evidence clock is ahead of import; no backdating allowed')
             old = {r['sig_exchange_id']: r for r in store.latest('race', now)}
             races, skipped = [], []
-            historical_data = read_input(DATA_PATH)
             for bound in bindings(config):
                 state = bound['race_key'].split(':')[2]
+                historical_data = reviewed_data(state)
                 if state not in historical_data['states']:
                     skipped.append(dict(exchange=bound['sig_exchange_id'],
                                         reason='historical_state_not_reviewed'))
@@ -101,6 +109,7 @@ def seed(runtime, config, now=None):
                 races.append(race)
             result = store.ingest(dict(schema_version=1,races=races,polls=[]),config,now)
             return dict(result, bound_contracts=len(races), skipped=skipped,
+                        historical_states=sorted({r['fundamentals_prior']['state'] for r in races}),
                         research_only=True, live_model_orders=False, policy=deepcopy(POLICY))
         finally:
             store.close()

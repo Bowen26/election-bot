@@ -92,6 +92,11 @@ def main():
     sub.add_parser('coverage', help='Show enabled race counts, limits and catalog exclusions; no network')
     performance = sub.add_parser('performance', help='Read local execution, markout and skip diagnostics')
     performance.add_argument('--paper', action='store_true')
+    drawdown = sub.add_parser('drawdown-status', help='Read portfolio drawdown and buy-pause status; no orders or state reset')
+    drawdown.add_argument('--paper', action='store_true')
+    strategy_performance = sub.add_parser('strategy-performance', help='Read FIFO profits, model allowance and blockers by entry route; no network')
+    strategy_performance.add_argument('--paper', action='store_true')
+    strategy_performance.add_argument('--json', action='store_true')
     diagnostics = sub.add_parser('diagnostics', help='Read venue freshness and exit blockers from the local journal')
     diagnostics.add_argument('--paper', action='store_true')
     analysis = sub.add_parser('analysis', help='Read entry-price and entry-gap markout reports; no network')
@@ -105,6 +110,10 @@ def main():
     exits.add_argument('--paper', action='store_true')
     exits.add_argument('--json', action='store_true')
     exits.add_argument('--hours', type=float, default=24)
+    rotation = sub.add_parser('rotation-study', help='Read prospective capital-rotation comparisons; no orders or network')
+    rotation.add_argument('--paper', action='store_true')
+    rotation.add_argument('--json', action='store_true')
+    rotation.add_argument('--hours', type=float, default=24)
     low = sub.add_parser('low-price-study', help='Replay low-price target/trailing exits from recorded quotes; no orders')
     low.add_argument('--paper', action='store_true')
     low.add_argument('--json', action='store_true')
@@ -130,6 +139,22 @@ def main():
     contracts.add_argument('--json', action='store_true')
     contracts.add_argument('--refresh', action='store_true', help='GET fresh rules and books for one --race and save review evidence')
     args = parser.parse_args()
+    if args.command == 'rotation-study':
+        from .rotation import report, format_report
+        result = report(RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3'), args.hours)
+        output(result) if args.json else print(format_report(result))
+        return
+    if args.command == 'drawdown-status':
+        from .drawdown import report
+        config = json.loads(args.config.read_text())
+        output(report(RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3'), config))
+        return
+    if args.command == 'strategy-performance':
+        from .strategy_performance import report, format_report
+        config = json.loads(args.config.read_text()) if args.config.exists() else None
+        result = report(RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3'), config)
+        output(result) if args.json else print(format_report(result))
+        return
     if args.command == 'demo':
         from .demo import run_demo
         run_demo()

@@ -261,3 +261,37 @@ The [local capacity settings](docs/capacity-settings.md) document the October 11
 `python3 -m election_bot low-price-study --hours 24` compares full profit-taking with a half-sale plus trailing runner on recorded 1–10-cent contract entries. It includes both cost buffers, partial depth-limited exits, stops, a six-hour holding limit and explicit unresolved outcomes for quote gaps. Add `--json` for complete paths. This is a read-only retrospective study, not live execution or a portfolio backtest; it needs no bot restart. See [low-price study assumptions](docs/low-price-study.md).
 
 `python3 -m election_bot low-price-study --hours 24 --entry-mode compare` additionally tests SIG momentum entries against the original external-gap rule. Momentum requires three spaced, rising bid/ask observations and a fresh breakout; an observed failed breakout can trigger exit. Both modes retain costs and depth limits, and results stay separate. This remains research-only; see [momentum assumptions](docs/low-price-study.md#sig-momentum-comparison-october-13-increment).
+
+### Strategy performance attribution
+
+Run `python3 -m election_bot strategy-performance` (or add `--json` / `--paper`) for confirmed FIFO profit and remaining cost by model versus other entries, model allowance remaining, and recent blocking reasons. The report runs read-only without stopping the bot. Hypothetical markouts stay separate from realized profit. See [methodology and limits](docs/strategy-performance.md).
+
+### Portfolio drawdown pause
+
+The optional [drawdown control](docs/drawdown-control.md) pauses new buys when buffered portfolio P&L, including unsold positions valued through SIG bid depth, falls 2,500 coins below its recorded peak. The local setting resumes buys below 1,250 coins of drawdown. Incomplete valuations also block buying; existing exit rules remain available subject to their normal safeguards. State survives restarts. Run `python3 -m election_bot drawdown-status` for a read-only check; restart the worker once to load this control.
+
+### Declining-position entry guard
+
+The optional [position entry guard](docs/position-entry-guard.md) blocks additional purchases after a confirmed two-cent decline in both SIG bid and ask. It requires spaced scan history, persists the pause through restarts and partial sales, and requires two later recovery observations before additions resume. Both market-price and model additions pass it; eligible exits retain priority. The local configuration enables it after worker restart, with a short observation warmup for existing holdings.
+
+### Partial risk-reduction exits
+
+The optional [risk-reduction exit](docs/risk-reduction-exit.md) sells up to 25% of a holding after three spaced SIG observations show a loss of at least five cents per share, including entry and exit buffers. It works for YES and NO holdings, uses fresh SIG prices, and does not require an external reference price once the contract binding has been verified. Confirmed risk sales have a 30-minute per-contract cooldown. Existing order caps and safety checks still apply. The local configuration enables it after a worker restart; the example configuration leaves it off.
+
+### Capital-rotation research
+
+The [capital-rotation study](docs/capital-rotation.md) records hypothetical partial sales that could fund a stronger external-price opportunity in another unowned race. It respects simulated post-sale capital and exposure limits and compares rotation with keeping those shares at 15-minute and one-hour horizons. It uses existing scan quotes and does not change live trades. The local configuration enables collection after a worker restart. Run `python3 -m election_bot rotation-study --hours 24` for measured comparisons and missing-data counts, or add `--json` for recent proposal details. External prices are labeled as proxies; no live rotation or calibrated fair-value claim is introduced.
+
+### Expanded historical fundamentals
+
+Historical-lean research now covers all six reviewed Senate catalog states: NH, IA, NC, MI, OH and TX. The additional official FEC counts use a separate versioned dataset so existing priors remain reproducible. Stop the current watcher, run `python3 -m election_bot fair-value --seed-fundamentals`, then restart it to import and observe the expanded comparisons. This does not change the live model's primary prior or trading limits. See the [October 16 methodology update](docs/independent-fair-value.md#historical-fundamentals-for-all-six-catalog-states-october-16-increment).
+
+
+### Paired evaluation of historical priors
+
+`python3 -m election_bot fair-value --hours 24` now compares neutral and historical model decisions on matching recorded evidence and quotes, including one-share buys versus holding cash. It reports cost-adjusted paired differences at 5 minutes, 15 minutes and one hour, with per-race details in `--json`. Missing outcomes stay unmeasured and observations are spaced by race. This read-only report needs no watcher restart and changes no live settings. See [paired evaluation](docs/independent-fair-value.md#paired-prior-evaluation-october-17-increment) for coverage and limitations.
+
+
+### Prospective threshold simulations and rejection reasons
+
+After one worker restart, independent polling research also collects **3¢/4¢/5¢ near-miss simulations** with 100 simulated coins per model/threshold/horizon, one-share entries, both cost buffers, depth limits, and persistent cash/positions. It logs polling, freshness, price, uncertainty, depth and cash rejection reasons. Run `python3 -m election_bot fair-value --hours 24` or add `--json` for per-race detail. Old observations are not converted into trades; live thresholds and budgets remain unchanged. See [near-miss assumptions and activation](docs/independent-fair-value.md#prospective-near-miss-portfolios-and-rejection-diagnostics-october-17).

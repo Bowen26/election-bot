@@ -6,7 +6,7 @@ import unittest
 import urllib.error
 from unittest.mock import Mock, patch
 
-from election_bot.clients import APIError, HTTP, Sig
+from election_bot.clients import APIError, HTTP, Sig, RecoveryHistoryUnavailable
 from tests import test_active
 
 
@@ -40,12 +40,39 @@ class ExpiredRecoveryTests(unittest.TestCase):
         self.e.reconcile(replay_unknown=True)
         self.assertEqual(self.s.place.call_count, 1)
 
+    def test_full_recovery_allows_coverage_to_advance_between_pages(self):
+        self.s.read = Mock(side_effect=[
+            {'data': [], 'coverage': {'complete': True, 'projectedThroughSequence': n},
+             'pagination': {'hasMore': n % 2 == 0, 'nextCursor': 'cursor' if n % 2 == 0 else None}}
+            for n in (100, 101, 102, 103)])
+        self.s.check_clock = Mock()
+        self.s.recovery_history = lambda exchange: Sig.recovery_history(self.s, exchange)
+        self.e.reconcile(replay_unknown=True)
+        self.assertFalse(self.j.pending())
+        self.assertEqual(self.j.db.execute('SELECT quantity FROM executions').fetchone()[0], '0')
+        event = self.j.db.execute("SELECT detail FROM events WHERE kind='expired_request_verified_unplaced'").fetchone()
+        self.assertEqual([r['sequence'] for r in json.loads(event[0])['checks']], [101, 103])
+
     def test_normal_restart_never_replays_or_releases(self):
         with self.assertRaisesRegex(RuntimeError, 'Unknown order'):
             self.e.reconcile()
         self.s.place.assert_not_called()
         self.s.recovery_history.assert_not_called()
         self.assertTrue(self.j.pending())
+
+    def test_unverified_history_retries_without_releasing_then_recovers(self):
+        self.s.recovery_history.side_effect = RecoveryHistoryUnavailable('coverage unavailable')
+        with self.assertRaises(RecoveryHistoryUnavailable):
+            self.e.reconcile(replay_unknown=True)
+        self.assertEqual(self.j.pending()[0]['key'], self.payload['idempotencyKey'])
+        self.assertEqual(self.j.db.execute('SELECT COUNT(*) FROM executions').fetchone()[0], 0)
+        self.s.recovery_history.side_effect = None
+        self.e.reconcile(replay_unknown=True)
+        self.assertFalse(self.j.pending())
+        self.assertEqual(self.j.db.execute('SELECT quantity FROM executions').fetchone()[0], '0')
+        self.assertEqual(self.s.place.call_count, 2)
+        for call in self.s.place.call_args_list:
+            self.assertEqual(call.args[0], self.payload)
 
     def test_other_400_never_enters_fallback(self):
         self.s.place.side_effect = APIError('other', status=400, method='POST', venue='SIG')
@@ -145,8 +172,8 @@ class RecoveryClientTests(unittest.TestCase):
         return {'data': rows or [], 'coverage': {'complete': complete, 'projectedThroughSequence': sequence},
                 'pagination': {'hasMore': more, 'nextCursor': 'next' if more else None}}
 
-    def test_paginated_history_requires_same_checkpoint(self):
-        s = self.client([self.page(more=True), self.page(sequence=101)])
+    def test_paginated_history_rejects_regressing_checkpoint(self):
+        s = self.client([self.page(more=True), self.page(sequence=99)])
         with self.assertRaisesRegex(RuntimeError, 'checkpoint'):
             s.recovery_history('2')
         s.check_clock.assert_not_called()
@@ -157,8 +184,57 @@ class RecoveryClientTests(unittest.TestCase):
             with self.subTest(page=page), self.assertRaises(RuntimeError):
                 self.client([page]).recovery_history('2')
 
+    def test_only_coverage_checkpoint_failures_get_recovery_retry_type(self):
+        for page in [self.page(complete=False), self.page(sequence=None), self.page(sequence=True)]:
+            with self.subTest(page=page), self.assertRaises(RecoveryHistoryUnavailable):
+                self.client([page]).recovery_history('2')
+        with self.assertRaises(RecoveryHistoryUnavailable):
+            self.client([self.page(more=True), self.page(sequence=99)]).recovery_history('2')
+        wrong = self.page(rows=[{'id': 7, 'exchangeId': '3', 'tournamentId': 'tournament'}])
+        with self.assertRaises(RuntimeError) as error:
+            self.client([wrong]).recovery_history('2')
+        self.assertNotIsInstance(error.exception, RecoveryHistoryUnavailable)
+
     def test_complete_history_preserves_pagination_and_checks_clock(self):
         s = self.client([self.page(more=True), self.page()])
         self.assertEqual(s.recovery_history('2'), {'orders': [], 'sequence': 100})
         self.assertEqual(s.read.call_args_list[1].kwargs['params']['cursor'], 'next')
         s.check_clock.assert_called_once()
+
+
+class AdvancingRecoveryCheckpointTests(unittest.TestCase):
+    client = RecoveryClientTests.client
+    page = RecoveryClientTests.page
+    def test_advancing_checkpoint_with_empty_terminal_page(self):
+        rows = [{'id': i, 'exchangeId': '2', 'tournamentId': 'tournament'} for i in range(1, 101)]
+        s = self.client([self.page(sequence=100, more=True, rows=rows), self.page(sequence=105)])
+        self.assertEqual(s.recovery_history('2'), {'orders': rows, 'sequence': 105})
+        self.assertEqual(s.read.call_args_list[1].kwargs['params']['cursor'], 'next')
+        s.check_clock.assert_called_once()
+
+    def test_advancing_checkpoint_preserves_all_rows(self):
+        a = {'id': 1, 'exchangeId': '2', 'tournamentId': 'tournament'}
+        b = dict(a, id=2)
+        s = self.client([self.page(more=True, rows=[a]), self.page(sequence=101, rows=[b])])
+        self.assertEqual(s.recovery_history('2')['orders'], [a, b])
+
+    def test_advancing_checkpoint_does_not_allow_duplicate_orders(self):
+        row = {'id': 1, 'exchangeId': '2', 'tournamentId': 'tournament'}
+        s = self.client([self.page(more=True, rows=[row]), self.page(sequence=101, rows=[row])])
+        with self.assertRaisesRegex(RuntimeError, 'identity mismatch'): s.recovery_history('2')
+
+    def test_advancing_checkpoint_does_not_allow_repeated_cursor(self):
+        s = self.client([self.page(more=True), self.page(sequence=101, more=True)])
+        with self.assertRaisesRegex(RuntimeError, 'pagination'): s.recovery_history('2')
+
+    def test_invalid_coverage_on_later_page_still_blocks(self):
+        for sequence, complete in [(None, True), (True, True), (-1, True), (101, False)]:
+            with self.subTest(sequence=sequence, complete=complete):
+                s = self.client([self.page(more=True), self.page(sequence=sequence, complete=complete)])
+                with self.assertRaisesRegex(RuntimeError, 'coverage/checkpoint'): s.recovery_history('2')
+                s.check_clock.assert_not_called()
+
+    def test_complete_history_still_requires_valid_clock(self):
+        s = self.client([self.page(more=True), self.page(sequence=101)])
+        s.check_clock.side_effect = RuntimeError('invalid clock')
+        with self.assertRaisesRegex(RuntimeError, 'invalid clock'): s.recovery_history('2')

@@ -46,12 +46,14 @@ def report(runtime, config, paper=False, hours=24, now=None):
         raise ValueError('Research lookback must be greater than zero and at most 168 hours')
     runtime=Path(runtime)
     result={'research_only':True,'model_version':VERSION,'calibrated':False,'as_of':now,
-        'hours':hours,'forecasts':[],'coverage':{},'events':{},'markouts':{},
+        'hours':hours,'forecasts':[],'coverage':{},'events':{},'markouts':{},'paired_priors':{},
         'limitations':['One-share displayed-price scenarios; no fills or portfolio simulation.',
             'Polling coefficients and sensitivity bounds are uncalibrated; no proven edge.',
             'Repeated scans and races are correlated; counts are not independent trials.',
             'Observations require successful normal scans; feed failures/news/cooldowns can bias coverage.',
             'Future price markouts do not measure election-probability calibration or settlement profit.']}
+    from .near_miss import report as near_miss_report
+    result['near_miss']=near_miss_report(runtime,paper,hours,now)
     path=runtime/'fair-value.sqlite3'
     mappings={m['sig_exchange_id']:m for m in config['markets'] if m.get('enabled')}
     covered=set()
@@ -81,6 +83,8 @@ def report(runtime, config, paper=False, hours=24, now=None):
         if not db.execute("SELECT 1 FROM events WHERE kind='fair_value_shadow' AND at>=? AND at<=? LIMIT 1",
                           (now-float(hours)*3600,now)).fetchone():return result
         quotes,_=load_events(db,now-float(hours)*3600,now)
+        from .fair_pairs import analyze as analyze_pairs
+        result['paired_priors']=analyze_pairs(db,quotes,now-float(hours)*3600,now)
         by_exchange=defaultdict(list)
         for q in quotes:by_exchange[q['exchange']].append(q)
         for rows in by_exchange.values():rows.sort(key=lambda r:r['at'])
@@ -142,6 +146,13 @@ def format_report(result):
             if variant['status']=='estimated':
                 lines.append(f"  {name}: YES {variant['yes_probability']:.1%}; D-R margin {variant['dem_margin_pp']:+.2f} pp")
             else:lines.append(f"  {name}: unavailable — {variant['reason']}")
+    from .near_miss import format_report as format_near_miss
+    if 'near_miss' in result:lines.append(format_near_miss(result['near_miss']))
+    paired=result.get('paired_priors',{})
+    if paired:
+        lines.append('Paired prior decisions: '+str(paired['decisions']))
+        for horizon,row in paired['horizons'].items():
+            lines.append(f"  {horizon}s: {row['measured_pairs']} measured pairs; historical minus neutral mean coins {row['mean_difference_net_coins']}; {row['statuses']}")
     lines.extend(['Recorded observations: '+str(result['events']), 'Forward one-share price scenarios: '+str(result['markouts']),
                   'Uncertainty range is a sensitivity scenario, not a confidence interval. Use --json for evidence and limitations.'])
     return '\n'.join(lines)

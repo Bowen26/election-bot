@@ -47,7 +47,7 @@ The model proposes one-share price ideas using SIG's executable ask, the configu
 
 `fair-value --hours 24` reports recorded candidates and 5-minute, 15-minute and 1-hour forward SIG **bid** changes from the original ask, less two cost buffers. Observations must fall within 2-minute, 3-minute and 15-minute windows respectively, with timestamps after the target. Missing/pending outcomes remain separate from zero returns. Repeated scans are correlated. This is not realized profit or a fill backtest, and it does not measure election-outcome probability calibration. Lookback is capped at the seven-day hot-event retention window; old research events join the lossless archive.
 
-Coverage is conditional on normal scans reaching the snapshot stage. The current scanner still fetches references first and skips some news/cooldown states, so an external-feed outage can prevent a research observation. Once observed, reference disagreement cannot alter the independent estimate. Wider verified race coverage, historical out-of-sample calibration, settlement-aware valuation and competition-end scoring remain follow-up work before any live model route. The VoteHub collector below now refreshes the initial reviewed bindings.
+Coverage is conditional on normal scans reaching the snapshot stage. The current scanner still fetches references first and skips some news/cooldown states, so an external-feed outage can prevent a research observation. Once observed, reference disagreement cannot alter the independent estimate. Wider verified race coverage, historical out-of-sample calibration, settlement-aware valuation and competition-end scoring remain follow-up work; the bounded live pilot does not establish that these validation steps are complete. The VoteHub collector below now refreshes the initial reviewed bindings.
 
 ## Public source pilot
 
@@ -105,6 +105,72 @@ Ohio is the November 3 special general election for the unexpired Senate term, a
 
 UMass Lowell/YouGov maps to the existing `yougov` family because the university identifies YouGov as its fieldwork provider. Joint releases therefore cannot manufacture a second independent pollster. Unknown families, partisan/internal polls, conflicting variants and candidate mismatches still quarantine. Poll acceptance is distinct from forecast eligibility: the two-family minimum, age checks and conservative 5% residual limit remain in place. No probability is invented for sparse races.
 
-The historical-lean dataset remains limited to NH, IA and NC. `--seed-fundamentals` now reports `historical_state_not_reviewed` and leaves other race records untouched, rather than failing the whole import as coverage grows. New states retain the existing neutral primary prior unless separately supplied with a validated custom prior. There is no historical-lean comparison for those states yet.
+At the October 11 increment, the historical-lean dataset was limited to NH, IA and NC. The October 16 extension below fills this gap for the other three catalog states. `--seed-fundamentals` now reports `historical_state_not_reviewed` and leaves other race records untouched, rather than failing the whole import as coverage grows. New states retain the existing neutral primary prior unless separately supplied with a validated custom prior. There is no historical-lean comparison for those states yet.
 
 Restart the existing worker to load this catalog, then hourly collection admits eligible new records. For an immediate research-only collection, use `python3 -m election_bot fair-value --collect-public`, followed by `python3 -m election_bot fair-value`. The model remains uncalibrated. These research commands cannot submit orders; live model entries require the separate opt-in adapter.
+
+
+## Historical fundamentals for all six catalog states (October 16 increment)
+
+The historical-lean comparison now supports **MI, OH and TX** in addition to NH, IA and NC. These are existing reviewed Senate polling bindings; the change adds historical inputs, not new polling races or new live contracts. The 2020 and 2024 presidential vote totals were checked against the [FEC 2020 results](https://www.fec.gov/resources/cms-content/documents/2020presgeresults.pdf) (printed pages 2 and 8) and [FEC 2024 results](https://www.fec.gov/resources/cms-content/documents/2024presgeresults.pdf) (pages 3 and 5).
+
+| State | 2020 Democratic / Republican votes | 2024 Democratic / Republican votes |
+| --- | --- | --- |
+| Michigan | 2,804,040 / 2,649,852 | 2,736,533 / 2,816,636 |
+| Ohio | 2,679,165 / 3,154,834 | 2,533,699 / 3,180,116 |
+| Texas | 5,259,126 / 5,890,347 | 4,835,250 / 6,393,597 |
+
+The added counts live in `data/research/fec-presidential-lean-expanded.json`. The original dataset is retained byte-for-byte. NH/IA/NC continue to use its original hash, values and availability; adding states cannot invalidate their stored priors or silently refresh their receipt time. New-state priors use the separate reviewed dataset hash. Imports remain append-only and idempotent, preserve custom primary priors, skip changed bindings, and never backdate new inputs. Future collections preserve these added alternative priors when the binding is unchanged.
+
+The model policy is unchanged: half of the mean state-minus-national two-party margin across those elections, with a 12-point prior standard deviation. This is an uncalibrated presidential-to-Senate research assumption. Incumbency and the current national environment remain neutral placeholders. Insufficient independent polling still produces no forecast; historical data does not override that filter. The existing live model continues to use the configured primary prior, not this alternative.
+
+Stop the existing watcher with Ctrl+C and wait for the prompt, then import and restart from the bot folder:
+
+```sh
+python3 -m election_bot fair-value --seed-fundamentals
+python3 -m election_bot watch --live
+```
+
+This order avoids giving an older running worker new-state priors it cannot yet validate. The import reports the states actually bound to enabled contracts; support for six catalog states does not mean all six are enabled locally. Use `python3 -m election_bot fair-value --json` to inspect the historical/neutral comparisons. No new API credentials are required. National environment, incumbency, election-outcome calibration and separate portfolio replay remain follow-up work.
+
+
+## Paired prior evaluation (October 17 increment)
+
+`python3 -m election_bot fair-value --hours 24` now includes paired prior decisions and forward comparisons. `--json` exposes the `paired_priors` coverage, per-horizon and per-race details. This is an immediately available, read-only report: no worker restart or new import is needed, and it uses previously recorded variant observations without inventing missing ones. No live parameters or forecasts change.
+
+The pair must contain neutral and historical forecasts for the same snapshot, base race version, prediction time, policy and polling weights/hashes. Both must be estimated. Entry prices and depth must match the original SIG snapshot. Conflicting duplicate events are excluded in full; unavailable variants, unmatched snapshots and invalid pairs are counted explicitly. Existing separate-route averages remain available, but they need not compare the same opportunities.
+
+For each pair, each policy either hypothetically buys one share on its recorded eligible side or holds cash. Both policies start with the same cash, sufficient for either action; unspent cash has zero return. Trade profit is future executable bid minus original ask minus two per-share cost buffers. Cash profit is zero. The paired difference is historical profit minus neutral profit. Both-cash cases are counted separately and excluded from measured trade averages. Same-side pairs necessarily tie; opposite-side and one-policy-only cases reveal differences in selection. These are recorded research eligibility decisions, not the separate live-model adapter's eligibility or an instruction to trade.
+
+At 5 minutes, 15 minutes and one hour, use the first fresh SIG scan in the existing outcome windows (2, 3 and 15 minutes). It must have one-share exit depth for every traded side. A thin first observation stays unmeasured; later favorable quotes cannot replace it. Missing and pending outcomes are separate from zero returns. Entry and future snapshots must pass the existing quote validation. The report prints sample counts and mean paired coin differences, never sums overlapping hypotheses into portfolio profit.
+
+Each horizon selects the first valid pair per race, then waits through that horizon plus its observation window before selecting another. Selection happens before checking the outcome, including when both policies hold cash or the outcome is missing. Complementary contracts in the same race share this spacing. Moving the report start changes the first selected sample; this is a descriptive report, not a fixed randomized trial. The raw decision counts and mean YES-probability shift include all valid pairs; horizon metrics use the spaced subset. YES shifts describe contract orientation and must not be interpreted as a Democratic probability shift across mixed orientations.
+
+The results remain correlated across races and days, depend on scan/retention coverage, and assume displayed fills. They do not model queue priority, execution latency, capital recycling, account limits or portfolio outcomes. Forward trading-price changes are not election-outcome calibration. No automatic promotion or threshold adjustment is attached to this report; broader verified inputs, calibration and cash-constrained portfolio replay remain later work.
+
+
+## Prospective near-miss portfolios and rejection diagnostics (October 17)
+
+After restarting the worker, ordinary scan observations with a polling research store also feed a separate research database: `.runtime/near-miss-live.sqlite3` (or `near-miss-paper.sqlite3`). No broker calls, live reservations, live balances, or trading settings are changed. This observer cannot place orders. It adds no network requests; it uses the already fetched SIG book and already computed forecasts. A research write/validation failure is logged as `near_miss_skip` without changing the live decision.
+
+Run `python3 -m election_bot fair-value --hours 24` for a summary, or add `--json` for the `near_miss` section. Reports are read-only and never create missing databases. A restart begins new collection; the report itself cannot create simulated entries from old records. There is no evidence backfill or threshold selection using future outcomes.
+
+**Frozen experiment:** neutral and historical prior variants, each at 3¢, 4¢ and 5¢ thresholds, separately at 5-minute, 15-minute and one-hour exit targets. Each of the 18 portfolios starts with **100 simulated coins** shared across all its races. These are experimental balances, not allocations of the competition account. Each entry buys one whole share, charges the recorded entry buffer, and reserves that cost. One position per race per portfolio prevents stacking and complementary-contract overlap. Balances and positions persist across worker restarts and report windows. Closing proceeds, less the recorded exit buffer, may fund later hypothetical entries. Losses reduce the balance; unavailable exits cannot manufacture cash.
+
+The required entry edge is the conservative sensitivity probability minus the SIG ask minus **both** entry and exit buffers. This is stricter than the older research screen, which subtracts one buffer. The threshold names therefore do not directly match the earlier one-buffer candidate counts. The fixed quote checks require source and observation times within 15 seconds, a positive uncrossed book, spread at most 4¢, a 0.5¢ entry tick, and enough top ask **and bid** depth for one share to use at most 25% of the displayed size. Decisions require an estimated forecast bound to the same race and prediction time. No external market prices are used in these model comparisons.
+
+Diagnostics record, per model/race/side/threshold, price-gap versus uncertainty rejection, entry/exit depth, spread, tick, and the conservative edge shortfall. Raw quote ages and stale/future failures are captured at the original scan time; the report does not reinterpret them using its later run time. Unavailable polling and missing historical variants are recorded separately. Portfolio-level cash limits, existing positions and cooldowns appear alongside these signal checks. Counts overlap across sides, thresholds and models and must not be added as independent opportunities. JSON provides minimum and latest edge shortfall in the selected window.
+
+A position seeks an exit at the first fresh executable scan at or after its target time; both quote timestamps must be at or after the target. Exit depth is capped at the same 25% participation and exit ticks must be valid. If the first post-target quote is thin or otherwise nonexecutable, the position stays open and may exit later. A changed contract fingerprint blocks that exit. The outcome windows allow 2, 3 and 15 minutes respectively. Late exits and exits following an initial failed execution check recycle their actual simulated proceeds but are separately excluded from clean timely-horizon averages. Per-race cooldowns run through the horizon plus its window, regardless of an earlier fill. Open positions past the window are reported overdue, never assumed liquidated for zero profit or loss.
+
+The report separates lifetime balances/open entry cost, realized results for exits in the selected window, clean timely exits, and pending/overdue positions. **Realized P&L excludes unrealized changes in remaining positions**, so it is not a portfolio total return or a fair ranking when coverage differs. Position histories and balances are retained; detailed observation diagnostics retain seven days. Changing the frozen policy is rejected rather than silently resetting the existing experiment.
+
+This is a cash-constrained displayed-price simulation, not proof of real fills. It assumes one-share top-of-book execution without queue priority, sequential latency, market impact or real exchange rejection. It does not apply the live account's exposure/news/drawdown limits; observations themselves remain conditional on the normal worker reaching these scans. All variants are correlated. No automatic threshold promotion or live setting change is attached. Broader polling evidence, election-outcome calibration and execution-quality validation remain separate work.
+
+To begin, stop the existing watcher with Ctrl+C and wait for the prompt, then run:
+
+```sh
+python3 -m election_bot watch --live
+```
+
+Use a second terminal for `python3 -m election_bot fair-value --hours 24`. No re-seeding of fundamentals is required for this update.

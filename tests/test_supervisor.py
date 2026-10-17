@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from election_bot import __main__ as cli
-from election_bot.clients import APIError
+from election_bot.clients import APIError, RecoveryHistoryUnavailable
 from election_bot.clock_guard import ClockCheckError
 from election_bot.state import exclusive_lock
 from election_bot.supervisor import failure_code, restartable, stop_child, watch, HALT, RETRY, RECOVER
@@ -72,6 +72,40 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(code,0)
         self.assertEqual([c[1][0][-2:] for c in children],
                          [['run','--live'],['recover','--wait'],['recover','--wait'],['run','--live']])
+
+    def test_history_coverage_failure_retries_recovery_until_verified(self):
+        recovery_code = failure_code(RecoveryHistoryUnavailable('coverage/checkpoint unverified'))
+        self.assertEqual(recovery_code, RECOVER)
+        code, children = self.run_watch([RECOVER, recovery_code, 0, 0], live=True)
+        self.assertEqual(code, 0)
+        self.assertEqual([c[1][0][-2:] for c in children],
+                         [['run', '--live'], ['recover', '--wait'], ['recover', '--wait'], ['run', '--live']])
+        delays = [json.loads(s)['retry_in_seconds'] for s in self.messages
+                  if json.loads(s)['status'] == 'restart_wait']
+        self.assertEqual(delays, [5, 10])
+
+    def test_persistent_history_failure_stops_at_shared_retry_limit(self):
+        recovery_code = failure_code(RecoveryHistoryUnavailable('coverage/checkpoint unverified'))
+        code, children = self.run_watch([RECOVER, recovery_code, recovery_code, recovery_code], live=True)
+        self.assertEqual(code, HALT)
+        self.assertEqual(len(children), 4)
+        self.assertTrue((self.runtime/'STOP').exists())
+        self.assertTrue(all(c[1][0][-2:] == ['recover', '--wait'] for c in children[1:]))
+        self.assertNotIn('recovered', [json.loads(s)['status'] for s in self.messages])
+
+    def test_history_error_message_alone_cannot_enable_retry(self):
+        self.assertEqual(failure_code(RuntimeError(
+            'Order recovery history coverage/checkpoint unverified; reservation retained')), HALT)
+
+    def test_STOP_during_history_retry_prevents_launch(self):
+        def report(message):
+            self.messages.append(message)
+            if json.loads(message)['status'] == 'restart_wait': (self.runtime/'STOP').touch()
+        with patch('election_bot.supervisor.time', self.clock), \
+             patch('election_bot.supervisor.subprocess.Popen', return_value=Process(
+                 failure_code(RecoveryHistoryUnavailable('coverage unavailable')))) as launch:
+            self.assertEqual(watch(self.root, self.runtime, self.config, live=True, report=report), 0)
+        self.assertEqual(launch.call_count, 1)
 
     def test_recovery_hard_halt_does_not_launch_trading(self):
         code,children=self.run_watch([RECOVER,HALT],live=True)
