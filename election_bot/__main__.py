@@ -106,6 +106,9 @@ def main():
     leadership.add_argument('--paper', action='store_true')
     leadership.add_argument('--json', action='store_true')
     leadership.add_argument('--hours', type=float, default=48, help='Lookback in hours, up to 720 (default: 48)')
+    patient = sub.add_parser('patient-study', help='Compare the patient entry pilot against the current entry method; no orders or network')
+    patient.add_argument('--paper', action='store_true')
+    patient.add_argument('--json', action='store_true')
     exits = sub.add_parser('exit-study', help='Read prospective exit-depth comparisons; no network')
     exits.add_argument('--paper', action='store_true')
     exits.add_argument('--json', action='store_true')
@@ -210,6 +213,11 @@ def main():
             print(format_report(result))
         return
     RUNTIME.mkdir(exist_ok=True, mode=0o700)
+    if args.command == 'patient-study':
+        from .patient_report import report, format_report
+        result = report(RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3'))
+        output(result) if args.json else print(format_report(result))
+        return
     if args.command == 'analysis':
         from .entry_analysis import report, format_report
         result = report(RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3'))

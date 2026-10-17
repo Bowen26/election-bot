@@ -98,6 +98,8 @@ def validate_config(config):
             raise ValueError('Enabled mapping names must be unique: ' + label)
         names.add(label)
     validate_risk_config(config)
+    from .patient_entry import settings as patient_settings
+    patient_settings(config)
     if execution.get("enabled"):
         from .race_controls import configured_races
         configured_races(config)

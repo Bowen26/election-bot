@@ -164,5 +164,12 @@
     "depth_fraction": ".25",
     "minimum_improvement_fraction": ".03",
     "cooldown_seconds": 1800
+  },
+  "patient_entry": {
+    "enabled": false,
+    "allocation": "500",
+    "improvement_ticks": 1,
+    "min_sig_spread": ".01",
+    "control_fraction": ".5"
   }
 }

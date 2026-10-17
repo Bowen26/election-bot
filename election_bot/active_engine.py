@@ -46,6 +46,9 @@ class ActiveEngine(Engine):
         from .rotation import RotationStudy
         self.rotation_study = RotationStudy(self.ledger, self.config)
         self.latest_entry_context = None
+        from . import patient_entry
+        patient_entry.initialize(self.journal.db)
+        self.latest_patient_context = None
         from . import model_live
         model_live.initialize(self.journal.db)
         self.latest_model_context = None
@@ -223,7 +226,7 @@ class ActiveEngine(Engine):
         last = self.races.last_sale(self.ledger, exchange)
         return max(0, last+seconds-time.time()) if last else 0
 
-    def reserve_order(self, payload, reserve, account, positions, exit_reason=None, exit_epoch=None, model_context=None, entry_context=None, risk_context=None):
+    def reserve_order(self, payload, reserve, account, positions, exit_reason=None, exit_epoch=None, model_context=None, entry_context=None, risk_context=None, patient_context=None):
         """Recheck local limits under the same write lock as the reservation."""
         drawdown_rejected = False
         position_rejected = None
@@ -313,6 +316,36 @@ class ActiveEngine(Engine):
                         fresh.quantity < D(payload['quantity'])):
                     raise ReservationRejected('Risk exit changed before reservation: '+detail['reason'])
                 self.risk_exit.attach(payload, detail)
+            if exit_reason == 'patient_entry':
+                from . import patient_entry
+                if patient_context is None or payload['action'] != 'buy':
+                    raise ReservationRejected('Missing patient entry context')
+                mapping, book, refs, settings = patient_context
+                if mapping['sig_exchange_id'] != exchange:
+                    raise ReservationRejected('Patient exchange changed before reservation')
+                # Re-derive the arm and price from committed state and the quotes already
+                # validated in pre-submit. No network call may run under the write lock.
+                limits = ({side: exposure.headroom(exchange, 'buy', side) for side in ('yes', 'no')}
+                          if exposure.enabled else None)
+                held, _ = self.held(exchange, positions)
+                control = choose(book, refs, settings, self.available(exchange, account),
+                                 None, limits)
+                if control is None:
+                    raise ReservationRejected('Control entry no longer eligible before reservation')
+                if held and ((held < 0) != (control.side == 'no')):
+                    raise ReservationRejected('Patient entry would oppose existing inventory')
+                fresh, detail = patient_entry.propose(self.journal.db, mapping, self.config,
+                                                      book, control, now=time.time())
+                if (fresh is None or fresh.side != payload['side'] or fresh.price != D(payload['price'])
+                        or fresh.quantity < D(payload['quantity'])):
+                    raise ReservationRejected('Patient entry changed before reservation: '+detail['reason'])
+                patient_entry.attach(self.journal.db, payload, detail)
+            elif exit_reason == 'entry_gap' and payload['action'] == 'buy':
+                # Measurement only: the control arm needs a denominator, and each
+                # control buy needs to record whether it could have been improved.
+                from . import patient_entry
+                patient_entry.attach_control(self.journal.db, payload, self.config,
+                                             self.latest_entry_context)
             loss = self.loss_status()
             if loss['realized_loss_stop_coins'] is not None and loss['net_realized_loss'] >= loss['realized_loss_stop_coins']:
                 raise RuntimeError('Realized loss limit reached before reservation')
@@ -432,6 +465,16 @@ class ActiveEngine(Engine):
         if entry and held and ((held < 0) != (entry.side == 'no')):
             entry = None  # Never use a complement buy to close or flip inventory.
             diagnostics.append({'reason': 'opposite_inventory'})
+        self.latest_patient_context = None
+        if entry is not None and exit_signal is None:
+            from .patient_entry import propose as patient_propose
+            patient, patient_detail = patient_propose(self.journal.db, mapping, self.config,
+                                                      book, entry, now=time.time())
+            self.journal.event('patient_entry_decision', {**patient_detail,
+                               'snapshot_id': self.latest_snapshot_id, 'phase': phase})
+            if patient is not None:
+                entry = patient
+                self.latest_patient_context = (mapping, book, refs, settings)
         signal = exit_signal or entry
         self.latest_model_context = None
         if signal is None and drawdown['buy_allowed'] and position_guard['buy_allowed'] and not reentry_wait and self.config.get('model_trading',{}).get('enabled'):
@@ -717,7 +760,8 @@ class ActiveEngine(Engine):
             try:
                 self.reserve_order(payload, reserve, account, positions, exit_reason=signal.reason,
                                    exit_epoch=self.latest_exit_epoch, model_context=self.latest_model_context,
-                                   entry_context=self.latest_entry_context, risk_context=self.latest_risk_context)
+                                   entry_context=self.latest_entry_context, risk_context=self.latest_risk_context,
+                                   patient_context=self.latest_patient_context)
             except ReservationRejected as error:
                 self.report('skip', {'exchange': exchange, 'reason': str(error)})
                 continue
