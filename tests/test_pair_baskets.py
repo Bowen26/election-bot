@@ -305,3 +305,16 @@ class ScreenTests(unittest.TestCase):
         with patch.object(pb, 'verify_pair', return_value=True):
             engine.pair_basket_cycle(broker.account(), broker.positions())
         self.assertEqual([o['exchangeId'] for o in broker.orders.values()], ['2', '3'])
+
+
+class BudgetSpentTests(unittest.TestCase):
+    engine = EngineTests.engine
+
+    def test_spent_budget_skips_screen_and_books(self):
+        engine, sig, _ = self.engine()
+        engine.pair_policy = dict(engine.pair_policy, total_coins=D(0))
+        with patch.object(sig, 'prices', create=True) as screen, patch.object(sig, 'book') as book:
+            engine.pair_basket_cycle(sig.account(), sig.positions())
+        screen.assert_not_called()
+        book.assert_not_called()
+        self.assertEqual(sig.orders, {})

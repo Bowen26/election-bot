@@ -133,3 +133,24 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(r['baskets']['matched_sets'], 10)
         self.assertAlmostEqual(r['baskets']['guaranteed_profit'], 0.2, places=6)
         self.assertIn('DASHBOARD', dash_format(r))
+
+
+class DashboardValueTests(unittest.TestCase):
+    def test_values_split_bid_fair_and_unmarked(self):
+        import sqlite3
+        from election_bot.dashboard import values
+        db = sqlite3.connect(':memory:')
+        db.executescript('''CREATE TABLE executions (exchange TEXT, side TEXT, action TEXT, quantity TEXT, price TEXT,
+                                buffer TEXT, at REAL);
+            CREATE TABLE drawdown_marks (exchange TEXT, side TEXT, quantity TEXT, bid_value TEXT);
+            CREATE TABLE drawdown_fair_marks (exchange TEXT, side TEXT, quantity TEXT, fair_value TEXT);''')
+        db.executemany('INSERT INTO executions VALUES (?,?,?,?,?,?,?)',
+                       [('1', 'yes', 'buy', '100', '.50', '.01', 1), ('1', 'yes', 'sell', '20', '.60', '.01', 2),
+                        ('2', 'no', 'buy', '10', '.30', '.01', 3)])
+        db.execute("INSERT INTO drawdown_marks VALUES ('1','yes','80','36')")
+        db.execute("INSERT INTO drawdown_fair_marks VALUES ('1','yes','80','56')")
+        v = values(db)
+        self.assertEqual((D(v['realized']), D(v['cost'])), (D('2'), D('43')))
+        self.assertEqual(D(v['pnl_at_sig_bid']), D('-2'))         # 2 + (36+3) - 43
+        self.assertEqual(D(v['pnl_at_reference_fair']), D('18'))  # 2 + (56+3) - 43
+        self.assertEqual((v['holdings'], v['no_bid_mark'], v['no_fair_mark']), (2, 1, 1))

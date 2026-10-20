@@ -92,6 +92,7 @@ class ActiveEngine(Engine):
         self.pair_policy = pair_baskets.settings(self.config)
         self.pair_list = pair_baskets.pairs(self.config)
         self.pair_cursor, self.pair_verified, self.pair_edges = 0, {}, {}
+        self._basket_budget_reported = None
         from .cash_reserve import settings as cash_settings
         self.cash_policy = cash_settings(self.config)
         self.scan_policy = 'priority_v1' if self.execution.get('priority_scanning', True) else 'news_round_robin'
@@ -324,6 +325,17 @@ class ActiveEngine(Engine):
         if not candidates:
             return
         unmatched = [p for p in candidates if pb.unmatched(self.journal.db, *p)]
+        if policy['total_coins']-pb.basket_cost(self.journal.db) < 1:
+            # Budget spent (a set costs about one coin): only repairs can trade, so skip
+            # the price screen and book reads for new baskets.
+            if self._basket_budget_reported != len(unmatched):
+                self.report('pair_basket_budget_spent', {'repairs_pending': len(unmatched)})
+                self._basket_budget_reported = len(unmatched)
+            candidates = unmatched
+            if not candidates:
+                return
+        else:
+            self._basket_budget_reported = None
         try:
             # One bulk read screens every pair; full books are read only where an edge shows.
             quotes = self.sig.prices([m['sig_exchange_id'] for p in candidates for m in p])
@@ -1190,20 +1202,22 @@ class ActiveEngine(Engine):
                     'enabled_contracts': len(self.markets),
                     'max_orders': self.execution['max_orders_per_cycle'], 'scan_policy': self.scan_policy,
                     **self.portfolio_summary()})
-        from .entry_ranking import settings as rank_settings, candidate, ordered
+        from .entry_ranking import settings as rank_settings, candidate, ordered, MAX_RECHECKS
         deferred = []
         ranking_enabled = rank_settings(self.config)
         def visits():
             for item in self.scanner.batch(self.pending_news, self.config.get('scan_batch_size', 8), self.scan_hints()):
                 yield item, None
             if ranking_enabled:
-                ranked = ordered(deferred)
+                now = time.time()
+                ranked = ordered(deferred, now)[:MAX_RECHECKS]
                 self.report('entry_ranking', {'policy':'net_surplus_v1','candidates':len(deferred),
-                    'fresh_candidates':len(ranked),'scope':'current scan batch only',
+                    'fresh_candidates':sum(d['expires'] >= now for d in deferred),'rechecked':len(ranked),
+                    'scope':'current scan batch only',
                     'order':[{'exchange':d['mapping']['sig_exchange_id'],'surplus_proxy':str(d['surplus'])} for d in ranked]})
                 for item in ranked:
-                    # Earlier submissions and API calls can age the remaining queue.
-                    if item['expires'] >= time.time():yield item['mapping'], item
+                    # Stale ranking quotes are fine here: preflight re-quotes and re-decides.
+                    yield item['mapping'], item
         for mapping, ranked in visits():
             if self.stopped():
                 return False

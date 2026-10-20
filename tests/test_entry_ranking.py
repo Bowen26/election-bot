@@ -9,8 +9,9 @@ import test_patient_entry as fixture
 class RankingTests(unittest.TestCase):
     def test_sort_and_stale_filter(self):
         rows=[{'mapping':{'sig_exchange_id':e},'surplus':D(v),'edge_per_coin':D('.1'),'expires':t}
-              for e,v,t in [('2','1',100),('3','2',100),('4','100',90)]]
-        self.assertEqual([d['mapping']['sig_exchange_id'] for d in ordered(rows,99)],['3','2'])
+              for e,v,t in [('2','1',100),('3','2',100),('4','100',90),('5','500',-30)]]
+        # Recently stale candidates stay (preflight re-quotes them); very old ones drop.
+        self.assertEqual([d['mapping']['sig_exchange_id'] for d in ordered(rows,99)],['4','3','2'])
     def test_patient_discount_does_not_boost_ranking(self):
         b=Book.make([('.55',100)],[('.60',100)])
         c={'strategy':{'cost_buffer_per_share':'.01','max_age_seconds':15}}
@@ -46,6 +47,17 @@ class RankingIntegrationTests(unittest.TestCase):
             return original(ex)
         self.f.sig.book=book;self.e.cycle()
         self.assertEqual(self.f.sig.orders[1]['exchangeId'],'2')
+    def test_stale_ranked_candidate_is_rechecked_and_traded(self):
+        import time
+        from election_bot import entry_ranking
+        real=entry_ranking.candidate
+        def stale(*args):
+            return dict(real(*args),expires=time.time()-30)  # ranking quotes aged out mid-batch
+        with patch('election_bot.entry_ranking.candidate',side_effect=stale):self.e.cycle()
+        self.assertEqual(self.f.sig.orders[1]['exchangeId'],'3')
+    def test_recheck_cap(self):
+        with patch('election_bot.entry_ranking.MAX_RECHECKS',0):self.e.cycle()
+        self.assertFalse(self.f.sig.orders)
     def test_expired_candidates_are_not_sent(self):
         with patch('election_bot.entry_ranking.ordered',return_value=[]):self.e.cycle()
         self.assertFalse(self.f.sig.orders)

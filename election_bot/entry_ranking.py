@@ -21,7 +21,13 @@ def candidate(mapping,signal,book,refs,config):
             'expires':min(min(b.source_at,b.observed_at) for b in [book,*refs])+config['strategy']['max_age_seconds']}
 
 
+# Stale ranking quotes only set the order: every ranked buy is re-quoted and re-decided
+# in preflight before submission. A bounded grace and recheck cap keep the queue short.
+RECHECK_GRACE_SECONDS=120
+MAX_RECHECKS=6
+
+
 def ordered(candidates,now=None):
     now=time.time() if now is None else now
-    return sorted((c for c in candidates if c['expires']>=now),
+    return sorted((c for c in candidates if c['expires']+RECHECK_GRACE_SECONDS>=now),
                   key=lambda c:(-c['surplus'],-c['edge_per_coin'],c['mapping']['sig_exchange_id']))

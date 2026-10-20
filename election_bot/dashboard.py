@@ -13,6 +13,38 @@ def _latest(db, kind):
     return (row[0], json.loads(row[1])) if row else (None, None)
 
 
+def values(db):
+    """Realized P&L plus open holdings at three bases, kept apart: SIG bid (what selling
+    now would fetch), reference fair (Kalshi/Polymarket mid, the same prices the entries
+    used) and cost. Uses the latest retained marks; a holding without a mark is counted."""
+    from .drawdown import unbuffered
+    db.row_factory = sqlite3.Row
+    try:
+        plain, realized = unbuffered(db.execute('SELECT * FROM executions ORDER BY at,rowid').fetchall())
+        bids = {r['exchange']: r for r in db.execute('SELECT * FROM drawdown_marks')}
+        fairs = {r['exchange']: r for r in db.execute('SELECT * FROM drawdown_fair_marks')}
+    finally:
+        db.row_factory = None
+    out = {'realized': sum(realized.values(), D(0)), 'cost': D(0), 'sig_bid': D(0), 'reference_fair': D(0),
+           'holdings': 0, 'no_bid_mark': 0, 'no_fair_mark': 0}
+    for (exchange, side), v in plain.items():
+        if v['quantity'] <= 0:
+            continue
+        out['holdings'] += 1
+        out['cost'] += v['cost']
+        for key, marks, column, missing in (('sig_bid', bids, 'bid_value', 'no_bid_mark'),
+                                            ('reference_fair', fairs, 'fair_value', 'no_fair_mark')):
+            mark = marks.get(exchange)
+            if mark is None or mark['side'] != side or D(mark['quantity']) != v['quantity']:
+                out[missing] += 1
+                out[key] += v['cost']  # Unmarked: count at cost so totals stay comparable.
+            else:
+                out[key] += D(mark[column])
+    out['pnl_at_sig_bid'] = out['realized']+out['sig_bid']-out['cost']
+    out['pnl_at_reference_fair'] = out['realized']+out['reference_fair']-out['cost']
+    return {k: (v if isinstance(v, int) else str(v)) for k, v in out.items()}
+
+
 def report(runtime, config, now=None):
     now = time.time() if now is None else now
     runtime = Path(runtime)
@@ -46,6 +78,8 @@ def report(runtime, config, now=None):
                              'sig_bid_fallback_marks': sum(m.get('basis') == 'sig_bid_fallback' for m in marks),
                              'seconds_ago': round(now-at)}
         tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if {'executions', 'drawdown_marks', 'drawdown_fair_marks'} <= tables:
+            result['values'] = values(db)
         if 'basket_orders' in tables:
             rows = db.execute('''SELECT b.race, b.exchange, b.role, e.action, CAST(e.quantity AS REAL), CAST(e.price AS REAL)
                 FROM basket_orders b JOIN executions e ON e.key=b.key''').fetchall()
@@ -106,6 +140,14 @@ def format_report(r):
         lines.append(f"P&L ({p['valuation']}): {float(D(p['portfolio_pnl'] or 0)):+,.0f}  peak {float(D(p['peak_pnl'] or 0)):+,.0f}  "
                      f"buys {'allowed' if p['buy_allowed'] else 'PAUSED ('+str(p['reason'])+')'}; "
                      f"{p['sig_bid_fallback_marks']} holdings at SIG-bid fallback, {p['missing']} unvalued")
+    v = r.get('values')
+    if v:
+        lines.append(f"Value: realized {float(D(v['realized'])):+,.0f} | open holdings ({v['holdings']}) cost {float(D(v['cost'])):,.0f}, "
+                     f"at SIG bid {float(D(v['sig_bid'])):,.0f}, at reference fair {float(D(v['reference_fair'])):,.0f}")
+        lines.append(f"P&L if sold now (SIG bid): {float(D(v['pnl_at_sig_bid'])):+,.0f}   "
+                     f"P&L at settlement if references are right: {float(D(v['pnl_at_reference_fair'])):+,.0f}"
+                     + (f"   (unmarked at cost: bid {v['no_bid_mark']}, fair {v['no_fair_mark']})"
+                        if v['no_bid_mark'] or v['no_fair_mark'] else ''))
     b = r.get('baskets')
     if b:
         lines.append(f"Baskets: {b['matched_sets']:,} matched sets in {b['races']} races, guaranteed {b['guaranteed_profit']:+,.2f}; "
