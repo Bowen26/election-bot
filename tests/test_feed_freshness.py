@@ -83,3 +83,23 @@ class SharedRateLimitTests(unittest.TestCase):
         import election_bot.clients as clients
         with patch.object(clients, 'SHARED_RATE_FILE', None):
             clients.shared_slot('read', sleep=lambda s: self.fail('should not wait'))
+
+
+class JournalConcurrencyTests(unittest.TestCase):
+    def test_long_reader_does_not_block_writer(self):
+        import sqlite3, tempfile
+        from pathlib import Path
+        from election_bot.state import Journal
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        path = Path(temp.name)/'live.sqlite3'
+        journal = Journal(path, 'test')
+        self.addCleanup(journal.close)
+        self.assertEqual(journal.db.execute('PRAGMA journal_mode').fetchone()[0], 'wal')
+        journal.event('x', {'n': 1})
+        reader = sqlite3.connect(path.resolve().as_uri()+'?mode=ro', uri=True)
+        self.addCleanup(reader.close)
+        reader.execute('BEGIN')
+        reader.execute('SELECT COUNT(*) FROM events').fetchone()       # long read transaction open
+        journal.event('x', {'n': 2})                                     # writer is not blocked
+        self.assertEqual(journal.db.execute('SELECT COUNT(*) FROM events').fetchone()[0], 2)

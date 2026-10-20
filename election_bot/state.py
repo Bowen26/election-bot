@@ -30,9 +30,12 @@ class Journal:
     def __init__(self, path, binding):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.db = sqlite3.connect(str(path))
+        # Wait out brief contention instead of halting on "database is locked".
+        self.db = sqlite3.connect(str(path), timeout=30)
         os.chmod(path, 0o600)
         self.db.row_factory = sqlite3.Row
+        # WAL: read-only reports and dashboards never block the trading writer.
+        self.db.execute('PRAGMA journal_mode=WAL')
         self.db.execute('PRAGMA synchronous=FULL')
         self.db.executescript('''
           CREATE TABLE IF NOT EXISTS identity (binding TEXT NOT NULL);
