@@ -552,5 +552,7 @@ if __name__ == '__main__':
         sys.exit(130)
     except Exception as error:
         print('HALTED: ' + str(error), file=sys.stderr)
-        from .supervisor import failure_code
-        sys.exit(failure_code(error))
+        from .supervisor import failure_code, record_halt
+        code = failure_code(error)
+        record_halt(RUNTIME, error, code)  # Lets the watcher decide whether auto-recovery is safe.
+        sys.exit(code)

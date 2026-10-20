@@ -98,3 +98,18 @@ The sale goes through the normal reservation, exposure, inventory and news check
 **Trade-off:** each sale gives up up to 2¢ per share of expected value on a race that is almost certainly won, in exchange for a larger expected edge on a newly called race. If the newly called race reverses, both legs lose.
 
 Enable by adding `"recycle_enabled": true` to the `election_night` block and restarting the watcher.
+
+## Auto-recovery (off unless enabled)
+
+`"auto_recovery": {"enabled": true, "max_per_hour": 6}` lets the watcher recover from known-safe halts without you. The worker records each halt reason in `.runtime/supervisor/last_halt.json`.
+
+**Recovered automatically:**
+- network and API errors (except 401/403)
+- cut-off or invalid JSON responses
+- clock-sample failures
+- `database is locked`
+- an account-vs-ledger mismatch, or unimported or unresolved orders
+
+**How it recovers:** the watcher waits (15 s, doubling up to 5 min; at least 60 s after a 429), runs `recover --wait`, then resumes trading. If that reconciliation fails, the bot halts normally; there is no retry loop. More than `max_per_hour` recoveries sets STOP. Each recovery sends an `auto_recovering` alert.
+
+**Still halts and alerts you:** everything else, including accounting inconsistencies, contract changes, the realized-loss stop, auth failures and configuration errors.

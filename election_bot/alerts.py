@@ -9,7 +9,7 @@ import urllib.parse
 import urllib.request
 
 DEFAULTS = dict(enabled=False, macos=True, push_url=None,
-                statuses=['halted', 'restart_wait', 'recovering', 'stopped'])
+                statuses=['halted', 'restart_wait', 'recovering', 'stopped', 'auto_recovering'])
 
 
 def settings(config):

@@ -37,6 +37,8 @@ def validate_config(config):
     pair_settings(config)
     from .cash_reserve import settings as cash_settings
     cash_settings(config)
+    from .supervisor import auto_settings
+    auto_settings(config)
     execution = config.get('execution', {})
     if execution.get('enabled'):
         if type(execution.get('priority_scanning', True)) is not bool:
