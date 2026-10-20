@@ -242,9 +242,10 @@ class ActiveEngine(Engine):
 
     def news_gate(self, mapping, signal):
         """News block for this signal; election-night buys may pass a generic uncertainty pause."""
-        from .election_night import REASON
+        from .election_night import REASON, RECYCLE
         block = self.news_block(mapping)
-        if block and signal is not None and signal.reason == REASON and self.election_night.overrides(block):
+        if (block and signal is not None and signal.reason in (REASON, RECYCLE)
+                and self.election_night.overrides(block)):
             return None
         return block
 
@@ -603,8 +604,16 @@ class ActiveEngine(Engine):
             elif reentry_wait and not self.election_night.policy['ignore_reentry_cooldown']:
                 night.update(status='blocked', reason='reentry_cooldown')
             else:
+                cash = D(account['myBalance']) - (D(0) if self.live else self.ledger.committed())
                 signal = self.election_night.select(book, refs, self.available(exchange, account),
-                                                    held, side_limits, night)
+                                                    held, side_limits, night, exchange=exchange, cash=cash)
+            if signal is None and held:
+                # Optional: free coins from a called, nearly settled holding for a better pending buy.
+                from .election_night import recycle
+                recycled = {}
+                signal = recycle(self.election_night, book, refs, held, exchange,
+                                 self.config['limits']['per_order'], recycled)
+                night['recycle'] = recycled
             # Stay on the priority lane only while SIG still lags a called race.
             if night.get('status') == 'eligible' or night.get('reason') == 'size_below_one_share':
                 self.scan_interest.flag(mapping['name'], 'election_night')

@@ -81,3 +81,20 @@ During the window, every `radar_seconds` (20) the bot reads top-of-book for ever
 `"alerts": {"enabled": true}` sends a macOS notification when the watcher reports `halted`, `restart_wait`, `recovering` or `stopped`.
 
 For phone alerts, add a `push_url`, for example a private ntfy.sh topic you create: `"push_url": "https://ntfy.sh/<your-topic>"`. The phone receives one short line (status, reason, exit code), never balances or positions. Alerts never block the watcher. They take effect when the watcher restarts.
+
+## Capital recycling (off by default)
+
+Cash, not opportunity, may limit election night. With `"recycle_enabled": true` inside `election_night`, the bot can sell part of a held race to fund a better pending buy. It only runs inside the window.
+
+1. **Pending buys.** When an election-night buy is cut short by a real cash shortfall (not by per-order or other deliberate limits), the route remembers that buy's edge, ask and shortfall for `recycle_pending_seconds` (120).
+2. **When it sells.** When the bot next visits a different held race, it may sell part of it (reason `election_night_recycle`) only if all of these hold:
+   - both fresh references call that race your way (bids ≥ `min_reference_bid`);
+   - the SIG bid is within `recycle_max_giveup` (2¢) of reference fair value;
+   - per share sold, `(bid ÷ pending ask) × pending edge − (fair − bid) ≥ recycle_margin` (1¢).
+3. **Size.** The sale covers only the shortfall, rounded up, capped by held shares, `depth_fraction` of the SIG bid, `max_shares`, `max_shares_per_order` and `limits.per_order`.
+
+The sale goes through the normal reservation, exposure, inventory and news checks. Like election-night buys, it may pass a generic news-uncertainty pause, never a disputed-result review. The settlement exit gate does not apply to these sales, because they deliberately trade a small give-up for a larger edge elsewhere.
+
+**Trade-off:** each sale gives up up to 2¢ per share of expected value on a race that is almost certainly won, in exchange for a larger expected edge on a newly called race. If the newly called race reverses, both legs lose.
+
+Enable by adding `"recycle_enabled": true` to the `election_night` block and restarting the watcher.

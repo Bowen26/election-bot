@@ -210,3 +210,79 @@ class RadarTests(unittest.TestCase):
         engine.election_radar()                          # reported, not raised
         engine.cycle()
         engine.observe_research_due.assert_not_called()
+
+
+class RecycleTests(unittest.TestCase):
+    def night(self, **changes):
+        return ElectionNight({'strategy': STRATEGY, 'election_night': dict(OPEN, **dict({'recycle_enabled': True}, **changes))})
+
+    def test_pending_buy_recorded_only_for_cash_shortfall(self):
+        n = self.night()
+        refs = [book('.96', '.98'), book('.96', '.98')]
+        n.select(book('.90', '.92', 300), refs, D(1000), 0, exchange='a', cash=D(50000))
+        self.assertNotIn('a', n.pending)                       # per-order cap, cash plenty
+        n.select(book('.90', '.92', 300), refs, D(40), 0, exchange='a', cash=D(40))
+        self.assertEqual(n.pending['a']['need_coins'], 150*D('.93')-40)
+        n.select(book('.90', '.92', 300), refs, D(1000), 0, exchange='a', cash=D(50000))
+        self.assertNotIn('a', n.pending)                       # cleared once affordable
+
+    def test_sells_called_holding_when_pending_edge_beats_giveup(self):
+        from election_bot.election_night import RECYCLE, recycle
+        n = self.night()
+        now = time.time()
+        n.pending['target'] = {'edge': D('.08'), 'ask': D('.90'), 'need_coins': D('50'), 'at': now}
+        refs = [book('.97', '.99'), book('.97', '.99')]       # fair .98, called YES
+        detail = {}
+        sale = recycle(n, book('.965', '.975', 500), refs, 400, 'held', 1000, detail, now)
+        self.assertEqual((sale.action, sale.side, sale.price, sale.reason), ('sell', 'yes', D('.965'), RECYCLE))
+        self.assertEqual(sale.quantity, 52)                    # ceil(50 / .965)
+        self.assertGreaterEqual(D(detail['net_gain_per_share']), D('.01'))
+
+    def test_recycle_blocks(self):
+        from election_bot.election_night import recycle
+        now = time.time()
+        refs = [book('.97', '.99'), book('.97', '.99')]
+        target = {'edge': D('.08'), 'ask': D('.90'), 'need_coins': D('50'), 'at': now}
+        cases = [(self.night(recycle_enabled=False), book('.965', '.975'), 400, 'disabled_or_no_position'),
+                 (self.night(), book('.95', '.975'), 400, 'not_worth_recycling'),       # gives up 3c
+                 (self.night(), book('.965', '.975'), -400, 'holding_not_called_our_way')]
+        for n, sig, held, reason in cases:
+            n.pending['target'] = dict(target)
+            detail = {}
+            self.assertIsNone(recycle(n, sig, refs, held, 'held', 1000, detail, now))
+            self.assertEqual(detail['reason'], reason)
+        n = self.night()
+        n.pending['target'] = dict(target, at=now-600)          # expired
+        detail = {}
+        self.assertIsNone(recycle(n, book('.965', '.975'), refs, 400, 'held', 1000, detail, now))
+        self.assertEqual(detail['reason'], 'no_pending_buy')
+        n.pending['held'] = dict(target, at=now)               # never sell to fund the same race
+        self.assertIsNone(recycle(n, book('.965', '.975'), refs, 400, 'held', 1000, {}, now))
+
+    def test_engine_places_recycling_sale_only_when_enabled(self):
+        for enabled, expected in ((True, ['buy', 'sell']), (False, ['buy'])):
+            temp = tempfile.TemporaryDirectory()
+            self.addCleanup(temp.cleanup)
+            config, original, refs = fixture()
+            config['execution'] = dict(test_active.EXECUTION)
+            config['election_night'] = dict(live_window(), recycle_enabled=enabled)
+            sig = test_active.Broker(original)
+            mapping = config['markets'][0]
+            mapping['sig_market_id'] = '2'
+            mapping['contract_fingerprint'] = fingerprint(contract_record(sig.market('2'), mapping, refs.metadata(mapping)))
+            prices = {'refs': ('.96', '.98')}
+            refs.books = Mock(side_effect=lambda m, md: [book(*prices['refs'], 500, 'Kalshi'),
+                                                          book(*prices['refs'], 500, 'Polymarket')])
+            sig.prices['2'] = ('.90', '.92')
+            journal = Journal(Path(temp.name)/'j.db', 'test')
+            self.addCleanup(journal.close)
+            engine = ActiveEngine(config, sig, refs, journal, temp.name, live=True)
+            engine.cycle()                                      # election-night buy
+            journal.db.execute('UPDATE orders SET created=?', (time.time()-1000,))
+            journal.db.commit()
+            prices['refs'] = ('.97', '.99')                     # fair .98; no convergence exit at .965
+            sig.prices['2'] = ('.965', '.975')                  # no new buy edge
+            engine.election_night.pending['other'] = {'edge': D('.08'), 'ask': D('.90'),
+                                                      'need_coins': D('50'), 'at': time.time()}
+            engine.cycle()
+            self.assertEqual([o['action'] for o in sig.orders.values()], expected)
