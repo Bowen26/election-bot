@@ -167,3 +167,46 @@ class RehearsalTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RadarTests(unittest.TestCase):
+    def test_reports_only_newly_called_races(self):
+        from election_bot.election_night import Radar
+        n = ElectionNight({'strategy': STRATEGY, 'election_night': live_window()})
+        radar = Radar(n)
+        called = [book('.96', '.98', venue='Kalshi'), book('.96', '.98', venue='Polymarket')]
+        open_race = [book('.60', '.62', venue='Kalshi'), book('.60', '.62', venue='Polymarket')]
+        now = time.time()
+        self.assertTrue(radar.due(now))
+        self.assertEqual(radar.update({'a': called, 'b': open_race}, now), {'a': 'yes'})
+        self.assertFalse(radar.due(now+1))
+        self.assertEqual(radar.update({'a': called, 'b': called}, now+30), {'b': 'yes'})
+        # Older bulk timestamps are accepted for detection only (radar_max_age_seconds).
+        old = [book('.96', '.98', venue='Kalshi', at=now-60), book('.96', '.98', venue='Polymarket', at=now-60)]
+        self.assertEqual(n.called_side(old), None)
+        self.assertEqual(n.called_side(old, 120), 'yes')
+
+    def test_engine_radar_flags_called_race_and_pauses_research_reads(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        config, original, refs = fixture()
+        config['execution'] = dict(test_active.EXECUTION)
+        config['election_night'] = live_window()
+        config['research_followups'] = {'enabled': True}
+        sig = test_active.Broker(original)
+        journal = Journal(Path(temp.name)/'j.db', 'test')
+        self.addCleanup(journal.close)
+        engine = ActiveEngine(config, sig, refs, journal, temp.name, live=True)
+        name = config['markets'][0]['name']
+        exchange = config['markets'][0]['sig_exchange_id']
+        refs.radar = Mock(return_value=({exchange: [book('.97', '.99', venue='Kalshi'),
+                                                    book('.97', '.99', venue='Polymarket')]}, {}))
+        engine.observe_research_due = Mock()
+        engine.election_radar()
+        refs.radar.assert_called_once()
+        self.assertIn('election_night', engine.scan_interest.watches[name])
+        engine.radar.last_run = 0
+        refs.radar.side_effect = RuntimeError('bulk endpoint changed')
+        engine.election_radar()                          # reported, not raised
+        engine.cycle()
+        engine.observe_research_due.assert_not_called()

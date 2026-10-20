@@ -19,7 +19,9 @@ from .strategy import D, Signal
 REASON = 'election_night'
 DEFAULTS = dict(enabled=False, start_at='2026-11-03T18:00:00-05:00', end_at='2026-11-04T12:00:00-05:00',
                 min_reference_bid='0.95', min_edge='0.02', max_price='0.99', depth_fraction='0.5',
-                max_shares=2000, ignore_reentry_cooldown=True, override_news_pauses=True)
+                max_shares=2000, ignore_reentry_cooldown=True, override_news_pauses=True,
+                radar_seconds=20, radar_max_age_seconds=120, radar_metadata_per_cycle=15,
+                pause_research_reads=True, drawdown_refresh_per_cycle=2)
 OVERRIDABLE_NEWS = ('News uncertainty pause',)
 
 
@@ -51,6 +53,12 @@ def settings(config):
         raise ValueError('Invalid election_night max_price or depth_fraction')
     if type(p['max_shares']) is not int or not 1 <= p['max_shares'] <= 100000:
         raise ValueError('election_night max_shares must be an integer from 1 to 100000')
+    if type(p['pause_research_reads']) is not bool:
+        raise ValueError('election_night pause_research_reads must be boolean')
+    for key, low, high in (('radar_seconds', 5, 600), ('radar_max_age_seconds', 15, 600),
+                           ('radar_metadata_per_cycle', 1, 200), ('drawdown_refresh_per_cycle', 1, 20)):
+        if type(p[key]) is not int or not low <= p[key] <= high:
+            raise ValueError('election_night %s must be an integer from %d to %d' % (key, low, high))
     return p
 
 
@@ -68,13 +76,16 @@ class ElectionNight:
         return (bool(news_reason) and self.active(now) and self.policy['override_news_pauses']
                 and news_reason.startswith(OVERRIDABLE_NEWS))
 
-    def called_side(self, refs):
-        """Side both fresh references bid at or above the threshold, else None."""
+    def called_side(self, refs, max_age=None):
+        """Side both fresh references bid at or above the threshold, else None.
+
+        Trading uses the strategy quote age; the detection radar passes a looser one.
+        """
         if len(refs) != 2:
             return None
         try:
             for venue, b in zip(('Kalshi', 'Polymarket'), refs):
-                b.check(self.strategy['max_age_seconds'], venue=venue)
+                b.check(self.strategy['max_age_seconds'] if max_age is None else max_age, venue=venue)
         except ValueError:
             return None
         for side in ('yes', 'no'):
@@ -121,6 +132,34 @@ class ElectionNight:
             return None
         detail.update(status='eligible', reason=REASON, quantity=quantity)
         return Signal(side, ask, quantity, fair, fair-ask, 'buy', REASON)
+
+
+class Radar:
+    """Watches every race through bulk reference reads; flags races as they become called.
+
+    Uses only public Kalshi/Polymarket endpoints. A flag only schedules a SIG check;
+    trades still require fresh single-book references in the normal decision.
+    """
+    def __init__(self, night):
+        self.night, self.metadata, self.called, self.last_run = night, {}, {}, 0.
+
+    def due(self, now):
+        return self.night.active(now) and now-self.last_run >= self.night.policy['radar_seconds']
+
+    def missing(self, markets):
+        return [m for m in markets if m['name'] not in self.metadata][:self.night.policy['radar_metadata_per_cycle']]
+
+    def update(self, books, now):
+        """Return races newly seen as called (name -> side) and record the current set."""
+        self.last_run = now
+        current = {}
+        for name, refs in books.items():
+            side = self.night.called_side(refs, self.night.policy['radar_max_age_seconds'])
+            if side is not None:
+                current[name] = side
+        fresh = {name: side for name, side in current.items() if self.called.get(name) != side}
+        self.called = current
+        return fresh
 
 
 def rehearse(path, config, hours=24, now=None):

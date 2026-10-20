@@ -78,6 +78,8 @@ class ActiveEngine(Engine):
         self.settlement_exits = exit_settings(self.config)
         from .election_night import ElectionNight
         self.election_night = ElectionNight(self.config)
+        from .election_night import Radar
+        self.radar = Radar(self.election_night)
         self.scan_policy = 'priority_v1' if self.execution.get('priority_scanning', True) else 'news_round_robin'
         self.scanner.set_policy(self.scan_policy)
 
@@ -600,7 +602,8 @@ class ActiveEngine(Engine):
             else:
                 signal = self.election_night.select(book, refs, self.available(exchange, account),
                                                     held, side_limits, night)
-            if self.election_night.called_side(refs) is not None:
+            # Stay on the priority lane only while SIG still lags a called race.
+            if night.get('status') == 'eligible' or night.get('reason') == 'size_below_one_share':
                 self.scan_interest.flag(mapping['name'], 'election_night')
             self.journal.event('election_night_decision', {**night, 'exchange': exchange,
                                'news_restricted': news_restricted,
@@ -751,9 +754,40 @@ class ActiveEngine(Engine):
             except (ValueError, KeyError, TypeError, sqlite3.Error) as error:
                 self.report('research_followup_skip', {'exchange': exchange, 'reason': str(error)})
 
+    def election_radar(self):
+        """Election night: bulk public reference reads flag newly called races for a SIG check."""
+        now = time.time()
+        if not self.radar.due(now):
+            return
+        try:
+            for mapping in self.radar.missing(self.markets):
+                try:
+                    self.radar.metadata[mapping['name']] = self.references.metadata(mapping)
+                except (ValueError, KeyError, TypeError, APIError) as error:
+                    self.radar.metadata[mapping['name']] = None
+                    self.report('election_radar_skip', {'market': mapping['name'], 'reason': str(error)[:120]})
+            items = [(m, self.radar.metadata[m['name']]) for m in self.markets
+                     if self.radar.metadata.get(m['name'])]
+            books, skipped = self.references.radar(items)
+            names = {m['sig_exchange_id']: m['name'] for m in self.markets}
+            fresh = self.radar.update({names[ex]: refs for ex, refs in books.items()}, now)
+        except Exception as error:
+            # Detection is optional: any radar failure must leave ordinary scanning running.
+            self.radar.last_run = now
+            self.report('election_radar_skip', {'error_type': type(error).__name__, 'reason': str(error)[:200]})
+            return
+        for name in fresh:
+            self.scan_interest.flag(name, 'election_night')
+        if fresh or skipped:
+            self.report('election_radar', {'called': len(self.radar.called), 'newly_called': fresh,
+                        'watched': len(items), 'skipped': len(skipped)})
+
     def refresh_drawdown(self):
         """Bounded SIG-only refresh, including holdings outside normal entry scanning."""
-        for exchange in self.drawdown.due():
+        due = self.drawdown.due()
+        if self.election_night.active():
+            due = due[:self.election_night.policy['drawdown_refresh_per_cycle']]  # Reads go to trading.
+        for exchange in due:
             if self.stopped():
                 return
             self.drawdown.attempted(exchange)
@@ -836,6 +870,7 @@ class ActiveEngine(Engine):
                 self.report('scan_complete', {**self._scan_metrics, 'status':self._scan_status,
                     'error_type':type(failure).__name__ if failure else None,
                     'seconds':round(time.monotonic()-started,2), 'scan_policy':self.scan_policy,
+                    'sig_reads_last_minute':getattr(getattr(self.sig,'http',None),'reads_last_minute',lambda:None)(),
                     **self.gate_metrics.summary()})
             except Exception:
                 if failure is None:raise
@@ -869,7 +904,12 @@ class ActiveEngine(Engine):
         self.report('portfolio_risk', {**Exposure(self.ledger, self.config).summary(), **self.loss_status()})
         self.observe_due()
         self.refresh_drawdown()
-        self.observe_research_due()
+        if self.election_night.active():
+            self.election_radar()
+            if not self.election_night.policy['pause_research_reads']:
+                self.observe_research_due()
+        else:
+            self.observe_research_due()
         if self.sig.open_orders():
             self.gate_block('open_orders', 'cycle')
             self._scan_status = 'waiting'

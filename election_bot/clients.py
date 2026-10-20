@@ -1,4 +1,5 @@
 """Documented public venue feeds and authenticated SIG competition API."""
+from collections import deque
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, wait
 from email.utils import parsedate_to_datetime
@@ -67,16 +68,26 @@ class HTTP:
         self.last_read = self.last_write = 0.0
         self.server_at = 0.0
         self.last_timing = None
+        self.read_times = deque(maxlen=600)
+
+    def reads_last_minute(self):
+        """Authenticated GETs started in the last 60 seconds (diagnostic only)."""
+        cutoff = time.monotonic()-60
+        return sum(t >= cutoff for t in self.read_times)
 
     def request(self, path, method='GET', params=None, payload=None):
         if not path.startswith('/') or '://' in path or '..' in path:
             raise ValueError("Invalid API path")
-        if method != 'GET' and self.base != 'https://sig.thesuper.market/api/v1':
+        # Polymarket's bulk order-book query is a POST but reads data only.
+        read_only_post = (method == 'POST' and self.base == 'https://clob.polymarket.com' and path == '/books')
+        if method != 'GET' and self.base != 'https://sig.thesuper.market/api/v1' and not read_only_post:
             raise ValueError("External venues are read-only")
         if self.key:
             attr, interval = ('last_read', 0.8) if method == 'GET' else ('last_write', 2.2)
             time.sleep(max(0, getattr(self, attr) + interval - time.monotonic()))
             setattr(self, attr, time.monotonic())
+            if method == 'GET':
+                self.read_times.append(time.monotonic())
         url = self.base + path
         if params:
             url += '?' + urllib.parse.urlencode(params)
@@ -377,6 +388,55 @@ class References:
         with self._lock:
             self._ensure_open()
             return self._books(mapping, metadata)
+
+    def radar(self, items, chunk=50):
+        """Top-of-book for many races in a few bulk public requests; no SIG access.
+
+        items: [(mapping, metadata)]. Returns ({exchange: [kalshi, polymarket]}, {exchange: reason}),
+        both books oriented to SIG YES. Races with an inactive or closed venue are skipped.
+        """
+        with self._lock:
+            self._ensure_open()
+            books, skipped = {}, {}
+            for start in range(0, len(items), chunk):
+                part = items[start:start+chunk]
+                tickers = [m['kalshi_ticker'] for m, _ in part]
+                kalshi = {r['ticker']: r for r in self.kalshi.request(
+                    '/markets', params={'tickers': ','.join(tickers), 'limit': len(tickers)})['markets']}
+                kt, k_at = self.kalshi.last_timing, self.kalshi.server_at
+                poly = {str(r['asset_id']): r for r in self.clob.request(
+                    '/books', method='POST', payload=[{'token_id': md[2]} for _, md in part])}
+                pt = self.clob.last_timing
+                for mapping, (_, market, token) in part:
+                    exchange = mapping['sig_exchange_id']
+                    try:
+                        k = kalshi.get(mapping['kalshi_ticker'])
+                        p = poly.get(str(token))
+                        if k is None or p is None:
+                            raise ValueError('missing_from_bulk_response')
+                        if k['status'] != 'active' or k.get('result'):
+                            raise ValueError('kalshi_not_active')
+                        if p.get('market') != market['conditionId']:
+                            raise ValueError('polymarket_condition_mismatch')
+                        kb = Book.make([(k['yes_bid_dollars'], k['yes_bid_size_fp'])],
+                                       [(k['yes_ask_dollars'], k['yes_ask_size_fp'])], k_at, venue='Kalshi',
+                                       timestamp_basis='http_date_minus_cache_age',
+                                       observed_at=kt['received_at'] if kt else None, transport=kt)
+                        pb = Book.make([(r['price'], r['size']) for r in p['bids']],
+                                       [(r['price'], r['size']) for r in p['asks']],
+                                       float(p['timestamp'])/1000, venue='Polymarket',
+                                       timestamp_basis='exchange_book_timestamp',
+                                       observed_at=pt['received_at'] if pt else None, transport=pt)
+                        pair = [kb, pb]
+                        for i, field in enumerate(('kalshi_yes_matches_sig_yes', 'polymarket_yes_matches_sig_yes')):
+                            if not isinstance(mapping[field], bool):
+                                raise ValueError('orientation_required')
+                            if not mapping[field]:
+                                pair[i] = pair[i].complement()
+                        books[exchange] = pair
+                    except (KeyError, TypeError, ValueError, ArithmeticError) as error:
+                        skipped[exchange] = str(error)[:80]
+            return books, skipped
 
     def _metadata(self, mapping):
         ticker = urllib.parse.quote(mapping['kalshi_ticker'], safe='')
