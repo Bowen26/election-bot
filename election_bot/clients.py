@@ -343,11 +343,38 @@ class Sig:
                 return self.http.request(path, params=params)
             except APIError as error:
                 delay = max(attempt + 1, error.retry_after or 0)
-                if error.status not in (502, 503, 504) or attempt == 2 or delay > 5:
+                # status None: the connection failed or timed out before any HTTP response.
+                if error.status not in (None, 502, 503, 504) or attempt == 2 or delay > 5:
                     raise
-                print('SIG read {} temporarily unavailable (HTTP {}); retrying in {}s'.format(
-                    path, error.status, delay), flush=True)
+                print('SIG read {} temporarily unavailable ({}); retrying in {}s'.format(
+                    path, 'HTTP %s' % error.status if error.status else 'connection failure', delay), flush=True)
                 time.sleep(delay)
+
+
+POLYMARKET_MAX_QUIET_SECONDS = 900
+
+
+def polymarket_book(data, timing, served_at):
+    """Polymarket's book timestamp is its last change, not when it was served.
+
+    A quiet book (same hash) keeps an aging timestamp although the server just
+    returned it. Within POLYMARKET_MAX_QUIET_SECONDS of its last change, the book
+    is current as of the HTTP response (as for Kalshi). Older books keep the
+    last-change time, so normal freshness checks still reject a dead book.
+    """
+    changed = float(data['timestamp']) / 1000
+    served = served_at if served_at and math.isfinite(served_at) else None
+    quiet = served - changed if served is not None else None
+    transport = dict(timing or {}, book_changed_at=changed,
+                     book_quiet_seconds=round(quiet, 3) if quiet is not None else None)
+    if quiet is not None and 0 <= quiet <= POLYMARKET_MAX_QUIET_SECONDS:
+        source, basis = served, 'http_date_minus_cache_age; book unchanged since book_changed_at'
+    else:
+        source, basis = changed, 'exchange_book_timestamp'
+    return Book.make([(r['price'], r['size']) for r in data['bids']],
+                     [(r['price'], r['size']) for r in data['asks']],
+                     source, venue='Polymarket', timestamp_basis=basis,
+                     observed_at=timing['received_at'] if timing else None, transport=transport)
 
 
 class References:
@@ -422,11 +449,7 @@ class References:
                                        [(k['yes_ask_dollars'], k['yes_ask_size_fp'])], k_at, venue='Kalshi',
                                        timestamp_basis='http_date_minus_cache_age',
                                        observed_at=kt['received_at'] if kt else None, transport=kt)
-                        pb = Book.make([(r['price'], r['size']) for r in p['bids']],
-                                       [(r['price'], r['size']) for r in p['asks']],
-                                       float(p['timestamp'])/1000, venue='Polymarket',
-                                       timestamp_basis='exchange_book_timestamp',
-                                       observed_at=pt['received_at'] if pt else None, transport=pt)
+                        pb = polymarket_book(p, pt, self.clob.server_at)
                         pair = [kb, pb]
                         for i, field in enumerate(('kalshi_yes_matches_sig_yes', 'polymarket_yes_matches_sig_yes')):
                             if not isinstance(mapping[field], bool):
@@ -487,10 +510,7 @@ class References:
         data = poly_data
         if str(data['asset_id']) != token or data['market'] != poly['conditionId']:
             raise ValueError("Polymarket token/condition mismatch")
-        pb = Book.make([(r['price'], r['size']) for r in data['bids']],
-                       [(r['price'], r['size']) for r in data['asks']],
-                       float(data['timestamp']) / 1000, venue='Polymarket', timestamp_basis='exchange_book_timestamp',
-                       observed_at=pt['received_at'] if pt else None, transport=pt)
+        pb = polymarket_book(data, pt, self.clob.server_at)
         books = [kb, pb]
         for i, field in enumerate(('kalshi_yes_matches_sig_yes', 'polymarket_yes_matches_sig_yes')):
             if not isinstance(mapping[field], bool):
