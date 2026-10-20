@@ -65,3 +65,19 @@ Optional keys, with their defaults:
 - References can be wrong or halted after a call. A stale or one-sided reference produces no signal, so the route goes quiet rather than guessing.
 - A race called and then reversed (a recount or a late count) can lose. The 0.95 threshold and 2¢ edge are judgement calls, not calibrated values.
 - Buys are booked to the reference route for throttle evidence.
+
+## Reference radar and read priority
+
+During the window, every `radar_seconds` (20) the bot reads top-of-book for every race from Kalshi (`GET /markets?tickers=…`) and Polymarket (`POST /books`, the one read-only POST the client allows). This takes a few bulk public requests and no SIG reads.
+
+- **Flagging:** a race newly seen as called (both bids ≥ `min_reference_bid`, timestamps within `radar_max_age_seconds` = 120) is put on the priority lane for an immediate SIG check. Polymarket bulk timestamps reflect the last book change, so they can be tens of seconds old; this looser age applies to detection only. Buys still need fresh single-book references (15 s).
+- **Staying on the priority lane:** a race keeps priority only while SIG still lags (an eligible buy, or one cut short by cash), so ~60 safe favorites don't monopolize the lane.
+- **Read priority:** research follow-up quotes pause (`pause_research_reads`), and drawdown refreshes are trimmed to `drawdown_refresh_per_cycle` (2), so SIG reads go to trading. The client already spaces SIG reads at least 0.8 s apart. Each `scan_complete` now reports `sig_reads_last_minute`.
+- **Failures:** if the radar fails, it is reported as `election_radar_skip`; ordinary scanning continues.
+- **Fix:** the post-sale reentry cooldown is now also exempted at reservation for election-night buys (when `ignore_reentry_cooldown` is true). Previously the reservation check still blocked them.
+
+## Alerts
+
+`"alerts": {"enabled": true}` sends a macOS notification when the watcher reports `halted`, `restart_wait`, `recovering` or `stopped`.
+
+For phone alerts, add a `push_url`, for example a private ntfy.sh topic you create: `"push_url": "https://ntfy.sh/<your-topic>"`. The phone receives one short line (status, reason, exit code), never balances or positions. Alerts never block the watcher. They take effect when the watcher restarts.

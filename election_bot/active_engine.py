@@ -323,7 +323,10 @@ class ActiveEngine(Engine):
                         if not checked['buy_allowed']:
                             position_rejected = (mapping, book, held)
                             raise ReservationRejected('Additional buys paused: '+checked['reason'], gate='position_entry_guard')
-                if self.reentry_wait(exchange):
+                from .election_night import REASON as NIGHT
+                night_exempt = (exit_reason == NIGHT and self.election_night.active()
+                                and self.election_night.policy['ignore_reentry_cooldown'])
+                if self.reentry_wait(exchange) and not night_exempt:
                     raise ReservationRejected('Race is in post-sale reentry cooldown', gate='reentry_cooldown')
                 if reserve > self.available(exchange, account):
                     raise ReservationRejected('Coin limits changed before reservation', gate='coin_limits')

@@ -96,6 +96,11 @@ def watch(root, runtime, config, live=False, report=print):
     child = None
     restarts = deque()
     total_restarts = 0
+    from .alerts import settings as alert_settings, notify
+    try:
+        alerting = alert_settings(json.loads(Path(config).read_text()))
+    except (OSError, ValueError, TypeError):
+        alerting = None  # The worker validates the same config and reports any error itself.
 
     def state(status, **extra):
         payload = {'event': 'supervisor', 'status': status, 'at': time.time(),
@@ -109,6 +114,8 @@ def watch(root, runtime, config, live=False, report=print):
             os.fsync(handle.fileno())
         temporary.replace(directory / 'status.json')
         report(json.dumps(payload))
+        if alerting is not None:
+            notify(alerting, payload)
 
     with exclusive_lock(directory), shutdown_signals():
         try:
