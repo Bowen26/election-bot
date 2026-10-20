@@ -103,3 +103,26 @@ class JournalConcurrencyTests(unittest.TestCase):
         reader.execute('SELECT COUNT(*) FROM events').fetchone()       # long read transaction open
         journal.event('x', {'n': 2})                                     # writer is not blocked
         self.assertEqual(journal.db.execute('SELECT COUNT(*) FROM events').fetchone()[0], 2)
+
+
+class TruncatedResponseTests(unittest.TestCase):
+    def test_cut_off_json_is_a_retryable_transport_error(self):
+        import io
+        from unittest.mock import MagicMock, patch
+        from election_bot.clients import APIError, HTTP, Sig
+        http = HTTP('https://sig.thesuper.market/api/v1', 'key')
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b'{"data": [{"id": "1", "title": "cut of'
+        response.headers = {'Date': 'Tue, 20 Oct 2026 13:00:00 GMT'}
+        http.opener = MagicMock()
+        http.opener.open.return_value = response
+        with patch('election_bot.clients.shared_slot'), patch('election_bot.clients.time.sleep'), \
+             self.assertRaises(APIError) as caught:
+            http.request('/x')
+        self.assertIsNone(caught.exception.status)          # status None: Sig.read retries it
+        sig = Sig.__new__(Sig)
+        sig.http = MagicMock()
+        sig.http.request.side_effect = [caught.exception, {'ok': True}]
+        with patch('election_bot.clients.time.sleep'):
+            self.assertEqual(sig.read('/x'), {'ok': True})

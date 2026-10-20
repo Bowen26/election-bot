@@ -162,7 +162,12 @@ class HTTP:
                     'http_date_at': finite(server_at+age) if date else None,
                     'cache_age_seconds': finite(age),
                     'http_date_minus_cache_age_at': finite(server_at) if date else None}
-                result = json.loads(body)
+                try:
+                    result = json.loads(body)
+                except ValueError:
+                    # A cut-off or garbled body is a transport failure: retryable, never a halt.
+                    raise APIError("{} {} returned an incomplete or invalid JSON body".format(method, path),
+                                   method=method, venue=self.venue) from None
                 self.server_at, self.last_timing = server_at, timing
                 return result
         except urllib.error.HTTPError as error:

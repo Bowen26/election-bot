@@ -14,7 +14,7 @@ import test_active
 from test_clock_pool import timing, T, M
 import test_profit_exit as profit
 from election_bot.active_engine import ActiveEngine
-from election_bot.clients import HTTP
+from election_bot.clients import APIError, HTTP
 from election_bot.clock_guard import check_timing, ClockCheckError, ClockSampleUnavailable
 from election_bot.demo import fixture
 from election_bot.engine import validate_config
@@ -91,7 +91,7 @@ class ClockEvidenceRegressionTests(unittest.TestCase):
         response.headers = {'Date':'Tue, 14 Nov 2023 22:13:20 GMT'}
         cm = Mock(); cm.__enter__ = Mock(return_value=response); cm.__exit__ = Mock(return_value=False)
         client.opener.open.side_effect = None; client.opener.open.return_value = cm
-        with self.assertRaises(ValueError): client.request('/book')
+        with self.assertRaises(APIError): client.request('/book')   # retryable transport error, not a halt
         self.assertEqual(client.last_timing, original)
         self.assertEqual(client.server_at, T)
         with self.assertRaises(ClockSampleUnavailable): check_timing(client.last_timing,T+20,M+20)
