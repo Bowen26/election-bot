@@ -980,9 +980,15 @@ class ActiveEngine(Engine):
                     # Basket legs are disabled mappings but still carry pinned reference identities.
                     mapping = next((m for m in self.config['markets'] if m.get('sig_exchange_id') == exchange
                                     and (m.get('enabled') or m.get('basket_leg'))), None)
-                    if mapping is None:
-                        raise ValueError('Held contract has no enabled mapping for fair-value marks')
-                    refs = self.references.books(mapping, self.metadata(mapping))
+                    try:
+                        if mapping is None:
+                            raise ValueError('Held contract has no enabled mapping for fair-value marks')
+                        refs = self.references.books(mapping, self.metadata(mapping))
+                    except (ValueError, KeyError, APIError) as error:
+                        if isinstance(error, APIError) and error.venue == 'SIG' and error.status in (401, 403, 429):
+                            raise
+                        # Still record the SIG bid mark: the drawdown falls back to it.
+                        self.report('drawdown_fair_mark_skip', {'exchange': exchange, 'reason': str(error)[:200]})
                 self.drawdown.observe(exchange, self.sig.book(exchange), refs)
             except APIError as error:
                 if error.status in (401, 403, 429):

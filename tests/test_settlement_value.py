@@ -105,8 +105,8 @@ class FairDrawdownTests(unittest.TestCase):
     def test_values_at_reference_midpoint_without_buffer(self):
         self.fill()
         book = Book.make([('.40', 200)], [('.42', 200)])
-        self.g.observe('2', book)                       # SIG-only: no fair mark yet
-        self.assertEqual(self.g.status()['reason'], 'valuation_incomplete')
+        self.g.observe('2', book)                       # SIG-only: falls back to the bid mark
+        self.assertEqual(self.g.status()['marks'][0]['basis'], 'sig_bid_fallback')
         self.g.observe('2', book, [ref('.60', '.62'), ref('.60', '.62', venue='Polymarket')])
         s = self.g.status()
         self.assertEqual(s['valuation'], 'reference_fair')
@@ -262,3 +262,28 @@ class RiskExitBlockTests(unittest.TestCase):
         engine.held = Mock(return_value=(0, 0))
         self.assertEqual(engine.risk_exit_decision(config['markets'][0], []), (None, None))
         engine.held.assert_called()
+
+
+class FairFallbackTests(unittest.TestCase):
+    def test_holding_without_valid_references_uses_sig_bid_mark(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        j = Journal(Path(temp.name)/'live.sqlite3', 'test')
+        self.addCleanup(j.close)
+        l = Ledger(j)
+        c, _, _ = fixture()
+        c['execution'] = dict(test_active.EXECUTION)
+        c['drawdown_control'] = dict(DEFAULTS, enabled=True, pause_coins='10', resume_coins='5', valuation='reference_fair')
+        g = Drawdown(l, c)
+        p = dict(idempotencyKey='k', exchangeId='2', quantity=100, price='.5', action='buy', side='yes')
+        j.reserve(p, D(100)*D('.51'))
+        l.record(p, 100, '.5', '.01')
+        one_sided = [Book.make([], [('.001', 45)], venue='Kalshi'), ref('.60', '.62', venue='Polymarket')]
+        g.observe('2', Book.make([('.55', 200)], [('.57', 200)]), one_sided)
+        s = g.status()
+        self.assertTrue(s['complete'])
+        self.assertEqual(s['marks'][0]['basis'], 'sig_bid_fallback')
+        self.assertEqual(s['portfolio_pnl'], D('5'))               # 100*(.55-.50), no buffer
+        g.observe('2', Book.make([('.55', 200)], [('.57', 200)]),
+                  [ref('.60', '.62'), ref('.60', '.62', venue='Polymarket')])
+        self.assertEqual(g.status()['marks'][0]['basis'], 'reference_fair')

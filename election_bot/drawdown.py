@@ -83,16 +83,27 @@ def evaluate_fair(db, holdings, plain, realized, policy, now):
     if state is None:raise ValueError('Missing fair-value drawdown state')
     peak=D(state['peak']);paused=bool(state['paused'])
     marks={r['exchange']:r for r in db.execute('SELECT * FROM drawdown_fair_marks')};current=epochs(db)
+    bids={r['exchange']:r for r in db.execute('SELECT * FROM drawdown_marks')}
     missing=[];values=[];unrealized=D(0)
+    def usable(mark,side,v):
+        if mark is None:return 'missing'
+        if mark['side']!=side or mark['epoch']!=current.get(ex) or D(mark['quantity'])!=v['quantity']:return 'inventory_changed'
+        if not 0<=now-mark['at']<=policy['max_fair_mark_age_seconds']:return 'stale_or_future'
+        return None
     for (ex,side),v in sorted(holdings.items()):
-        mark=marks.get(ex);reason=None
-        if mark is None:reason='missing'
-        elif mark['side']!=side or mark['epoch']!=current.get(ex) or D(mark['quantity'])!=v['quantity']:reason='inventory_changed'
-        elif not 0<=now-mark['at']<=policy['max_fair_mark_age_seconds']:reason='stale_or_future'
-        elif not 0<=D(mark['fair_value'])<=v['quantity']:reason='invalid_value'
-        if reason:missing.append(dict(exchange=ex,reason=reason));continue
-        pnl=D(mark['fair_value'])-plain[(ex,side)]['cost']
-        unrealized+=pnl;values.append(dict(exchange=ex,side=side,age_seconds=now-mark['at'],pnl=pnl))
+        mark=marks.get(ex);reason=usable(mark,side,v)
+        if reason is None and not 0<=D(mark['fair_value'])<=v['quantity']:reason='invalid_value'
+        if reason is None:
+            value,basis,age=D(mark['fair_value']),'reference_fair',now-mark['at']
+        else:
+            # References can be one-sided or stale (decided races, election night). Fall back
+            # to the conservative SIG bid liquidation value rather than blocking every buy.
+            bid=bids.get(ex);fallback=usable(bid,side,v)
+            if fallback is None and not 0<=D(bid['bid_value'])<=v['quantity']:fallback='invalid_value'
+            if fallback:missing.append(dict(exchange=ex,reason=reason,sig_bid_fallback=fallback));continue
+            value,basis,age=D(bid['bid_value']),'sig_bid_fallback',now-bid['at']
+        pnl=value-plain[(ex,side)]['cost']
+        unrealized+=pnl;values.append(dict(exchange=ex,side=side,age_seconds=age,pnl=pnl,basis=basis))
     realized_pnl=sum(realized.values(),D(0))
     result=dict(enabled=True,valuation='reference_fair',complete=not missing,buy_allowed=False,paused=paused,
                 peak_pnl=peak,pause_coins=policy['pause_coins'],resume_coins=policy['resume_coins'],
