@@ -232,3 +232,24 @@ class RepairTests(unittest.TestCase):
             engine.pair_basket_cycle(sig.account(), sig.positions())   # price back at .475 bid
         self.assertEqual([o['exchangeId'] for o in sig.orders.values()], ['2', '3'])
         self.assertIsNone(pb.unmatched(journal.db, *engine.pair_list[0]))
+
+
+class UnresolvedLegTests(unittest.TestCase):
+    def test_error_after_sending_a_leg_propagates(self):
+        from election_bot.clients import APIError
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        config, original, refs = configured()
+        sig = test_active.Broker(original)
+        anchor = config['markets'][0]
+        anchor['contract_fingerprint'] = fingerprint(contract_record(sig.market('2'), anchor, refs.metadata(anchor)))
+        sig.prices.update({'2': ('.57', '.60'), '3': ('.475', '.50')})
+        journal = Journal(Path(temp.name)/'j.db', 'test')
+        self.addCleanup(journal.close)
+        engine = ActiveEngine(config, sig, refs, journal, temp.name, live=True)
+        sig.order = Mock(side_effect=APIError('GET /orders/1 returned HTTP 503', status=503, method='GET', venue='SIG'))
+        with patch.object(pb, 'verify_pair', return_value=True), self.assertRaises(APIError) as caught:
+            engine.pair_basket_cycle(sig.account(), sig.positions())
+        self.assertEqual(caught.exception.status, 503)          # original error, for supervisor handling
+        self.assertEqual(len(sig.orders), 1)                     # no second leg after an unresolved first
+        self.assertEqual(len(journal.pending()), 1)              # reservation kept for reconciliation

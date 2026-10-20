@@ -30,6 +30,13 @@ class ReservationRejected(ValueError):
         self.gate = gate
 
 
+class BasketOrderUnresolved(Exception):
+    """A basket leg was sent (or may have been); its original error must reach recovery."""
+    def __init__(self, error):
+        super().__init__(str(error))
+        self.original = error
+
+
 class InventoryValidationError(ValueError):
     def __init__(self, reason, message):
         super().__init__(message)
@@ -269,8 +276,14 @@ class ActiveEngine(Engine):
             except SubmissionClockUnavailable:
                 self.ledger.record(payload, 0, 0, fee)
                 raise
+            except BaseException as error:
+                # Sent or possibly sent: never let the basket loop skip past it.
+                raise BasketOrderUnresolved(error) from error
             self.journal.response(payload['idempotencyKey'], response)
-            self.finish(payload['idempotencyKey'], payload, response, reserve)
+            try:
+                self.finish(payload['idempotencyKey'], payload, response, reserve)
+            except BaseException as error:
+                raise BasketOrderUnresolved(error) from error
         else:
             self.ledger.record(payload, int(quantity), D(price), fee)
             self.report('paper_fill', {'exchange': exchange, 'side': 'no', 'price': str(price),
@@ -362,6 +375,10 @@ class ActiveEngine(Engine):
                     continue
                 size = int(min(filled, fresh.bids[0][1]*policy['depth_fraction']))
                 detail['second_filled'] = self.submit_basket_leg(legs[second], second, price, size, account, positions) if size >= 1 else 0
+            except BasketOrderUnresolved as error:
+                # Same handling as an unresolved ordinary order: recovery, retry or halt.
+                detail['halt'] = 'basket order unresolved: '+str(error)[:160]
+                raise error.original
             except ReservationRejected as error:
                 detail['skip'] = 'reservation: '+str(error)
                 self.gate_block(error.gate, 'pair_basket', anchor['sig_exchange_id'])
