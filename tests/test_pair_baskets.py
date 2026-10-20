@@ -253,3 +253,29 @@ class UnresolvedLegTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, 503)          # original error, for supervisor handling
         self.assertEqual(len(sig.orders), 1)                     # no second leg after an unresolved first
         self.assertEqual(len(journal.pending()), 1)              # reservation kept for reconciliation
+
+
+class SchedulingTests(unittest.TestCase):
+    def test_no_identity_reads_without_edge_and_hot_pairs_first(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        config, original, refs = configured()
+        sig = test_active.Broker(original)
+        anchor = config['markets'][0]
+        anchor['contract_fingerprint'] = fingerprint(contract_record(sig.market('2'), anchor, refs.metadata(anchor)))
+        sig.prices.update({'2': ('.50', '.52'), '3': ('.45', '.47')})          # no edge
+        journal = Journal(Path(temp.name)/'j.db', 'test')
+        self.addCleanup(journal.close)
+        engine = ActiveEngine(config, sig, refs, journal, temp.name, live=True)
+        with patch.object(pb, 'verify_pair') as verify:
+            engine.pair_basket_cycle(sig.account(), sig.positions())
+        verify.assert_not_called()
+        self.assertEqual(engine.pair_edges['2026:senate:NH'], D('-.05'))
+        engine.pair_edges['2026:senate:NH'] = D('.03')
+        other = ({**anchor, 'race_key': 'x', 'sig_exchange_id': '8'}, {'sig_exchange_id': '9'})
+        engine.pair_list.append(other)
+        engine.pair_policy = dict(engine.pair_policy, pairs_per_cycle=2)
+        seen = []
+        engine.news_block = Mock(side_effect=lambda m: seen.append(m['race_key']) or 'Disputed-result review')
+        engine.pair_basket_cycle(sig.account(), sig.positions())
+        self.assertEqual(seen[0], '2026:senate:NH')                           # hot pair checked first

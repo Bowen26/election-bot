@@ -124,6 +124,8 @@ def main():
     night.add_argument('--paper', action='store_true')
     night.add_argument('--json', action='store_true')
     night.add_argument('--hours', type=float, default=24)
+    dash = sub.add_parser('dashboard', help='One-screen status: watcher, P&L, baskets, orders, errors; local files only')
+    dash.add_argument('--json', action='store_true')
     swing = sub.add_parser('swing-risk', help='Stress holdings against a uniform national swing; no network')
     swing.add_argument('--paper', action='store_true')
     swing.add_argument('--json', action='store_true')
@@ -250,6 +252,11 @@ def main():
         else:
             from .research_followups import report, format_report
             result = report(path, hours=args.hours)
+        output(result) if args.json else print(format_report(result))
+        return
+    if args.command == 'dashboard':
+        from .dashboard import report, format_report
+        result = report(RUNTIME, json.loads(args.config.read_text()))
         output(result) if args.json else print(format_report(result))
         return
     if args.command == 'swing-risk':

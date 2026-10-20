@@ -109,3 +109,27 @@ class SwingTests(unittest.TestCase):
         self.assertGreater(D(row['6']), D(row['0']))
         self.assertEqual(r['direction']['shares_paying_if_democrat_wins'], '100')
         self.assertIn('SWING', format_report(r))
+
+
+class DashboardTests(unittest.TestCase):
+    def test_reports_without_journal_and_with_basket(self):
+        from election_bot.dashboard import report as dash, format_report as dash_format
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        config, _, _ = fixture()
+        runtime = Path(temp.name)
+        self.assertEqual(dash(runtime, config)['status'], 'no live journal')
+        j = Journal(runtime/'live.sqlite3', 'test')
+        Ledger(j)
+        from election_bot import pair_baskets
+        pair_baskets.initialize(j.db)
+        now = time.time()
+        for key, ex, role, price in (('a', '2', 'anchor', '.43'), ('b', '3', 'leg', '.55')):
+            j.db.execute('INSERT INTO executions VALUES (?,?,?,?,?,?,?,?)', (key, ex, 'buy', 'no', '10', price, '.01', now))
+            j.db.execute('INSERT INTO basket_orders VALUES (?,?,?,?)', (key, 'r', ex, role))
+        j.db.commit()
+        j.close()
+        r = dash(runtime, config, now)
+        self.assertEqual(r['baskets']['matched_sets'], 10)
+        self.assertAlmostEqual(r['baskets']['guaranteed_profit'], 0.2, places=6)
+        self.assertIn('DASHBOARD', dash_format(r))

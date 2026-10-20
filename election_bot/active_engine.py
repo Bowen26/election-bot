@@ -91,7 +91,7 @@ class ActiveEngine(Engine):
         pair_baskets.initialize(self.journal.db)
         self.pair_policy = pair_baskets.settings(self.config)
         self.pair_list = pair_baskets.pairs(self.config)
-        self.pair_cursor, self.pair_verified = 0, {}
+        self.pair_cursor, self.pair_verified, self.pair_edges = 0, {}, {}
         self.scan_policy = 'priority_v1' if self.execution.get('priority_scanning', True) else 'news_round_robin'
         self.scanner.set_policy(self.scan_policy)
 
@@ -308,9 +308,15 @@ class ActiveEngine(Engine):
         candidates = [p for p in self.pair_list if policy['races'] is None or p[0]['race_key'] in policy['races']]
         if not candidates:
             return
+        # Unmatched legs and pairs that recently showed (near-)edge get a slot first; the rest rotate.
+        hot = [p for p in candidates
+               if pb.unmatched(self.journal.db, *p)
+               or self.pair_edges.get(p[0]['race_key'], -1) >= policy['min_edge']-D('.005')]
+        hot = sorted(hot, key=lambda p: -self.pair_edges.get(p[0]['race_key'], 1))[:max(1, policy['pairs_per_cycle']//2)]
         start = self.pair_cursor % len(candidates)
-        batch = (candidates[start:]+candidates[:start])[:policy['pairs_per_cycle']]
-        self.pair_cursor = start+len(batch)
+        rotation = [p for p in candidates[start:]+candidates[:start] if p not in hot]
+        batch = hot+rotation[:policy['pairs_per_cycle']-len(hot)]
+        self.pair_cursor = start+policy['pairs_per_cycle']-len(hot)
         for anchor, leg in batch:
             if self.stopped():
                 return
@@ -325,15 +331,18 @@ class ActiveEngine(Engine):
                     held, _ = self.held(mapping['sig_exchange_id'], positions)
                     if held > 0:
                         raise ValueError('holds YES on a basket contract')
-                now = time.time()
-                if now-self.pair_verified.get(race, 0) > policy['verify_seconds']:
-                    self.metadata(anchor, force=True)   # Existing full pin for the anchor.
-                    pb.verify_pair(self.sig.market(anchor['sig_market_id']),
-                                   self.sig.market(leg['sig_market_id']), anchor, leg)
-                    self.pair_verified[race] = now
+                def verify():
+                    # Identity reads only when a trade is possible; cached for verify_seconds.
+                    if time.time()-self.pair_verified.get(race, 0) > policy['verify_seconds']:
+                        self.metadata(anchor, force=True)   # Existing full pin for the anchor.
+                        pb.verify_pair(self.sig.market(anchor['sig_market_id']),
+                                       self.sig.market(leg['sig_market_id']), anchor, leg)
+                        self.pair_verified[race] = time.time()
                 books = {'anchor': self.sig.book(anchor['sig_exchange_id']), 'leg': self.sig.book(leg['sig_exchange_id'])}
                 for book in books.values():
                     book.check(self.config['strategy']['max_age_seconds'], venue='SIG')
+                if books['anchor'].bids and books['leg'].bids:
+                    self.pair_edges[race] = books['anchor'].bids[0][0]+books['leg'].bids[0][0]-1
                 legs = {'anchor': anchor, 'leg': leg}
                 repair = pb.unmatched(self.journal.db, anchor, leg)
                 if repair:
@@ -344,6 +353,7 @@ class ActiveEngine(Engine):
                     if price is not None and price <= cap:
                         size = int(min(quantity, bids[0][1]*policy['depth_fraction']))
                         if size >= 1:
+                            verify()
                             detail['repaired'] = self.submit_basket_leg(legs[role], role, price, size, account, positions)
                             if detail['repaired']:
                                 self.mark_holding(legs[role])
@@ -358,6 +368,7 @@ class ActiveEngine(Engine):
                     detail['skip'] = reason
                     continue
                 detail.update(edge=str(plan['edge']), sets=plan['sets'], order=plan['order'])
+                verify()
                 first, second = plan['order']
                 filled = self.submit_basket_leg(legs[first], first, plan['prices'][first], plan['sets'], account, positions)
                 detail['first_filled'] = filled
