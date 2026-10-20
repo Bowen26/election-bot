@@ -253,6 +253,19 @@ class Sig:
         market['resolution_tree'] = tree['root']
         return market
 
+    def prices(self, exchanges):
+        """Best bid/ask for many exchanges, 100 per read. Screening only: cached up to 2 s, no depth."""
+        exchanges = [str(e) for e in exchanges]
+        if not all(e.isdigit() for e in exchanges):
+            raise ValueError("SIG exchange IDs must be numeric")
+        result = {}
+        for start in range(0, len(exchanges), 100):
+            data = self.read('/exchanges/prices', params={'ids': ','.join(exchanges[start:start+100]),
+                                                         'tournamentId': self.tid})
+            for row in data['data']:
+                result[str(row['exchangeId'])] = (row.get('bestBid'), row.get('bestAsk'))
+        return result
+
     def book(self, exchange):
         if not str(exchange).isdigit():
             raise ValueError("SIG exchange ID must be numeric")

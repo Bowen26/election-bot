@@ -280,3 +280,28 @@ class SchedulingTests(unittest.TestCase):
         engine.news_block = Mock(side_effect=lambda m: seen.append(m['race_key']) or 'Disputed-result review')
         engine.pair_basket_cycle(sig.account(), sig.positions())
         self.assertEqual(seen[0], '2026:senate:NH')                           # hot pair checked first
+
+
+class ScreenTests(unittest.TestCase):
+    def test_bulk_screen_picks_edges_and_skips_books_elsewhere(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        config, original, refs = configured()
+        broker = test_active.Broker(original)
+        anchor = config['markets'][0]
+        anchor['contract_fingerprint'] = fingerprint(contract_record(broker.market('2'), anchor, refs.metadata(anchor)))
+        broker.prices.update({'2': ('.57', '.60'), '3': ('.475', '.50')})
+        journal = Journal(Path(temp.name)/'j.db', 'test')
+        self.addCleanup(journal.close)
+        engine = ActiveEngine(config, broker, refs, journal, temp.name, live=True)
+        sig = Mock(wraps=broker)
+        sig.tid = broker.tid
+        engine.sig = sig
+        sig.prices = Mock(return_value={'2': (0.50, 0.52), '3': (0.45, 0.47)})      # screen: no edge
+        engine.pair_basket_cycle(broker.account(), broker.positions())
+        sig.book.assert_not_called()
+        self.assertEqual(engine.pair_edges['2026:senate:NH'], D('-.05'))
+        sig.prices = Mock(return_value={'2': (0.57, 0.60), '3': (0.475, 0.50)})     # screen: edge
+        with patch.object(pb, 'verify_pair', return_value=True):
+            engine.pair_basket_cycle(broker.account(), broker.positions())
+        self.assertEqual([o['exchangeId'] for o in broker.orders.values()], ['2', '3'])

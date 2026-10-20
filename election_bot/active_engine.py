@@ -92,6 +92,8 @@ class ActiveEngine(Engine):
         self.pair_policy = pair_baskets.settings(self.config)
         self.pair_list = pair_baskets.pairs(self.config)
         self.pair_cursor, self.pair_verified, self.pair_edges = 0, {}, {}
+        from .cash_reserve import settings as cash_settings
+        self.cash_policy = cash_settings(self.config)
         self.scan_policy = 'priority_v1' if self.execution.get('priority_scanning', True) else 'news_round_robin'
         self.scanner.set_policy(self.scan_policy)
 
@@ -321,15 +323,30 @@ class ActiveEngine(Engine):
         candidates = [p for p in self.pair_list if policy['races'] is None or p[0]['race_key'] in policy['races']]
         if not candidates:
             return
-        # Unmatched legs and pairs that recently showed (near-)edge get a slot first; the rest rotate.
-        hot = [p for p in candidates
-               if pb.unmatched(self.journal.db, *p)
-               or self.pair_edges.get(p[0]['race_key'], -1) >= policy['min_edge']-D('.005')]
-        hot = sorted(hot, key=lambda p: -self.pair_edges.get(p[0]['race_key'], 1))[:max(1, policy['pairs_per_cycle']//2)]
-        start = self.pair_cursor % len(candidates)
-        rotation = [p for p in candidates[start:]+candidates[:start] if p not in hot]
-        batch = hot+rotation[:policy['pairs_per_cycle']-len(hot)]
-        self.pair_cursor = start+policy['pairs_per_cycle']-len(hot)
+        unmatched = [p for p in candidates if pb.unmatched(self.journal.db, *p)]
+        try:
+            # One bulk read screens every pair; full books are read only where an edge shows.
+            quotes = self.sig.prices([m['sig_exchange_id'] for p in candidates for m in p])
+            for anchor, leg in candidates:
+                a, l = quotes.get(anchor['sig_exchange_id']), quotes.get(leg['sig_exchange_id'])
+                if a and l and a[0] is not None and l[0] is not None:
+                    self.pair_edges[anchor['race_key']] = D(str(a[0]))+D(str(l[0]))-1
+            screened = sorted((p for p in candidates if p not in unmatched
+                               and self.pair_edges.get(p[0]['race_key'], -1) >= policy['min_edge']),
+                              key=lambda p: -self.pair_edges[p[0]['race_key']])
+            batch = (unmatched+screened)[:policy['pairs_per_cycle']]
+        except (APIError, ValueError, KeyError, TypeError, ArithmeticError) as error:
+            if isinstance(error, APIError) and error.status in (401, 403, 429):
+                raise
+            self.report('pair_basket_screen_skip', {'reason': str(error)[:160]})
+            # Fallback: unmatched legs and recent edges first, the rest in rotation.
+            hot = unmatched+[p for p in candidates if p not in unmatched
+                             and self.pair_edges.get(p[0]['race_key'], -1) >= policy['min_edge']-D('.005')]
+            hot = hot[:max(1, policy['pairs_per_cycle']//2)]
+            start = self.pair_cursor % len(candidates)
+            rotation = [p for p in candidates[start:]+candidates[:start] if p not in hot]
+            batch = hot+rotation[:policy['pairs_per_cycle']-len(hot)]
+            self.pair_cursor = start+policy['pairs_per_cycle']-len(hot)
         for anchor, leg in batch:
             if self.stopped():
                 return
@@ -457,12 +474,15 @@ class ActiveEngine(Engine):
                 raise InventoryValidationError('inventory_mismatch', 'Account inventory differs from bot ledger; race paused')
         return owned, cost
 
-    def available(self, exchange, account):
+    def available(self, exchange, account, reserve_floor=True):
         limits = self.config['limits']
         cash = D(account['myBalance'])
         if not self.live:
             # Paper inventory must consume paper cash without altering the real account.
             cash -= self.ledger.committed()
+        if reserve_floor:
+            from .cash_reserve import floor
+            cash -= floor(self.cash_policy)  # Election-night reserve; zero once the window opens.
         return max(D(0), min(D(limits['per_order']), cash,
             D(limits['per_market']) - self.races.committed(self.ledger, exchange),
             D(limits['total']) - self.ledger.committed(),
@@ -534,7 +554,9 @@ class ActiveEngine(Engine):
                                 and self.election_night.policy['ignore_reentry_cooldown'])
                 if self.reentry_wait(exchange) and not (night_exempt or basket):
                     raise ReservationRejected('Race is in post-sale reentry cooldown', gate='reentry_cooldown')
-                if reserve > self.available(exchange, account):
+                # The cash floor is for election night; basket legs were sized against it before
+                # the first leg, so a completing leg never strands an unmatched position.
+                if reserve > self.available(exchange, account, reserve_floor=not (basket or exit_reason == NIGHT)):
                     raise ReservationRejected('Coin limits changed before reservation', gate='coin_limits')
                 if basket:
                     race, role = basket_context
@@ -818,7 +840,7 @@ class ActiveEngine(Engine):
                 night.update(status='blocked', reason='reentry_cooldown')
             else:
                 cash = D(account['myBalance']) - (D(0) if self.live else self.ledger.committed())
-                signal = self.election_night.select(book, refs, self.available(exchange, account),
+                signal = self.election_night.select(book, refs, self.available(exchange, account, reserve_floor=False),
                                                     held, side_limits, night, exchange=exchange, cash=cash)
             if signal is None and held:
                 # Optional: free coins from a called, nearly settled holding for a better pending buy.

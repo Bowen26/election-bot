@@ -35,6 +35,8 @@ def validate_config(config):
     alert_settings(config)
     from .pair_baskets import settings as pair_settings
     pair_settings(config)
+    from .cash_reserve import settings as cash_settings
+    cash_settings(config)
     execution = config.get('execution', {})
     if execution.get('enabled'):
         if type(execution.get('priority_scanning', True)) is not bool:
