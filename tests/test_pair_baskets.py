@@ -85,7 +85,8 @@ class AttributionTests(unittest.TestCase):
         self.db.execute('INSERT INTO executions VALUES (?,?,?,?,?,?,?,?)',
                         (key, exchange, 'buy', 'no', str(quantity), price, '.01', 0))
         if basket:
-            self.db.execute('INSERT INTO basket_orders VALUES (?,?,?,?)', (key, 'r', exchange, 'x'))
+            self.db.execute('INSERT INTO basket_orders VALUES (?,?,?,?)',
+                            (key, 'r', exchange, 'anchor' if exchange == '2' else 'leg'))
 
     def test_locked_unmatched_and_cost(self):
         anchor, leg = {'sig_exchange_id': '2'}, {'sig_exchange_id': '3'}

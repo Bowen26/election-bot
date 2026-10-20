@@ -20,8 +20,10 @@ from .clients import fingerprint, sig_contract_record
 from .strategy import D
 
 REASON = 'pair_basket'
+SWAP = 'pair_swap'
 DEFAULTS = dict(enabled=False, min_edge='0.02', depth_fraction='0.5', max_sets_per_order=2000,
-                total_coins='10000', pairs_per_cycle=3, verify_seconds=900, races=None)
+                total_coins='10000', pairs_per_cycle=3, verify_seconds=900, races=None,
+                swap_enabled=False)
 
 
 def settings(config):
@@ -29,8 +31,9 @@ def settings(config):
     if not isinstance(raw, dict) or set(raw)-set(DEFAULTS):
         raise ValueError('Invalid pair_baskets configuration')
     p = dict(DEFAULTS, **raw)
-    if type(p['enabled']) is not bool:
-        raise ValueError('pair_baskets enabled must be boolean')
+    for key in ('enabled', 'swap_enabled'):
+        if type(p[key]) is not bool:
+            raise ValueError('pair_baskets %s must be boolean' % key)
     for key in ('min_edge', 'depth_fraction', 'total_coins'):
         p[key] = D(p[key])
     if not D('.005') <= p['min_edge'] <= D('.5') or not 0 < p['depth_fraction'] <= 1 or p['total_coins'] <= 0:
@@ -135,19 +138,50 @@ def initialize(db):
                    'exchange TEXT NOT NULL, role TEXT NOT NULL)')
 
 
-def attributed(db):
-    """Filled NO shares and cost per exchange that were bought for baskets."""
+def attributed(db, roles=('anchor', 'leg')):
+    """Filled NO shares and cost per exchange bought for baskets, for the given roles."""
     result = {}
     for exchange, quantity, cost in db.execute(
             'SELECT b.exchange, SUM(CAST(e.quantity AS REAL)), SUM(CAST(e.quantity AS REAL)*CAST(e.price AS REAL)) '
-            'FROM basket_orders b JOIN executions e ON e.key=b.key WHERE e.action=\'buy\' GROUP BY b.exchange'):
+            'FROM basket_orders b JOIN executions e ON e.key=b.key WHERE e.action=\'buy\' AND b.role IN (%s) '
+            'GROUP BY b.exchange' % ','.join('?'*len(roles)), roles):
         result[exchange] = (D(str(int(quantity or 0))), D(str(cost or 0)))
     return result
 
 
 def locked(db, exchange):
-    """Basket shares on this exchange that other routes must not sell."""
-    return attributed(db).get(exchange, (D(0), D(0)))[0]
+    """Basket and swap NO shares on this exchange that other routes must not sell."""
+    return attributed(db, ('anchor', 'leg', 'swap_buy')).get(exchange, (D(0), D(0)))[0]
+
+
+def swap_unmatched(db, anchor, leg):
+    """(NO-Republican shares still owed for completed YES-Democratic swap sales, break-even cap) or None."""
+    sold, proceeds = db.execute(
+        'SELECT SUM(CAST(e.quantity AS REAL)), SUM(CAST(e.quantity AS REAL)*CAST(e.price AS REAL)) '
+        'FROM basket_orders b JOIN executions e ON e.key=b.key '
+        'WHERE b.role=\'swap_sell\' AND e.action=\'sell\' AND b.exchange=?', (anchor['sig_exchange_id'],)).fetchone()
+    sold, proceeds = D(str(int(sold or 0))), D(str(proceeds or 0))
+    bought = attributed(db, ('swap_buy',)).get(leg['sig_exchange_id'], (D(0), D(0)))[0]
+    if sold <= bought:
+        return None
+    # Break-even: never pay more for NO-Republican than the average YES-Democratic sale price.
+    return int(sold-bought), proceeds/sold
+
+
+def swap_plan(anchor_book, leg_book, policy, held_yes, coins, fee=D(0)):
+    """Sell YES-Democratic at its bid, then buy NO-Republican at 1-bid_R: the NO-basket edge."""
+    if not anchor_book.bids or not leg_book.bids:
+        return None, 'no_yes_bid'
+    (bid_a, size_a), (bid_l, size_l) = anchor_book.bids[0], leg_book.bids[0]
+    edge = bid_a+bid_l-1
+    if edge < policy['min_edge']:
+        return None, 'edge_below_minimum'
+    price_l = 1-bid_l
+    sets = int(min(policy['depth_fraction']*min(size_a, size_l), D(policy['max_sets_per_order']), D(held_yes),
+                   max(D(0), D(coins))/(price_l+D(fee)) if coins is not None else D(policy['max_sets_per_order'])))
+    if sets < 1:
+        return None, 'size_below_one_set'
+    return {'sets': sets, 'edge': edge, 'sell_price': bid_a, 'buy_price': price_l}, None
 
 
 def unmatched(db, anchor, leg):
@@ -166,7 +200,8 @@ def unmatched(db, anchor, leg):
 
 
 def basket_cost(db):
-    return sum((cost for _, cost in attributed(db).values()), D(0))
+    """Coins tied up in basket and swap NO shares (counts toward total_coins)."""
+    return sum((cost for _, cost in attributed(db, ('anchor', 'leg', 'swap_buy')).values()), D(0))
 
 
 def discover(config, sig, refs, races=None, limit=None, interval=3.0, sleep=time.sleep, clock=time.monotonic):

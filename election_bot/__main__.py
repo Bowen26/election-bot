@@ -126,6 +126,8 @@ def main():
     night.add_argument('--hours', type=float, default=24)
     dash = sub.add_parser('dashboard', help='One-screen status: watcher, P&L, baskets, orders, errors; local files only')
     dash.add_argument('--json', action='store_true')
+    check = sub.add_parser('config-check', help='Validate config.json and list every feature switch and limit; no network')
+    check.add_argument('--json', action='store_true')
     swing = sub.add_parser('swing-risk', help='Stress holdings against a uniform national swing; no network')
     swing.add_argument('--paper', action='store_true')
     swing.add_argument('--json', action='store_true')
@@ -182,6 +184,9 @@ def main():
     contracts.add_argument('--json', action='store_true')
     contracts.add_argument('--refresh', action='store_true', help='GET fresh rules and books for one --race and save review evidence')
     args = parser.parse_args()
+    # One per-account SIG request budget shared by the bot and every side command.
+    import election_bot.clients as clients_module
+    clients_module.SHARED_RATE_FILE = RUNTIME / 'sig-rate.json'
     if args.command == 'rotation-study':
         from .rotation import report, format_report
         result = report(RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3'), args.hours)
@@ -253,6 +258,13 @@ def main():
             from .research_followups import report, format_report
             result = report(path, hours=args.hours)
         output(result) if args.json else print(format_report(result))
+        return
+    if args.command == 'config-check':
+        from .config_check import report, format_report
+        result = report(args.config)
+        output(result) if args.json else print(format_report(result))
+        if not result['valid']:
+            sys.exit(2)
         return
     if args.command == 'dashboard':
         from .dashboard import report, format_report

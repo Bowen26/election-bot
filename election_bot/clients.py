@@ -51,6 +51,46 @@ class RecoveryHistoryUnavailable(RuntimeError):
     """Retry recovery with fresh history; never release an unverified reservation."""
 
 
+# SIG allows 100 reads and 30 writes per minute per account, across every process.
+# When SHARED_RATE_FILE is set (the CLI sets it inside .runtime), all commands share
+# one file-locked rolling budget slightly below those limits. Unset: no shared limit.
+SHARED_RATE_FILE = None
+SHARED_LIMITS = {'read': 90, 'write': 27}
+
+
+def shared_slot(kind, sleep=time.sleep, clock=time.time):
+    """Block until this process may make one more SIG request of this kind."""
+    if SHARED_RATE_FILE is None:
+        return
+    import fcntl
+    from pathlib import Path
+    path = Path(SHARED_RATE_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        with open(path, 'a+') as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                handle.seek(0)
+                try:
+                    state = json.loads(handle.read() or '{}')
+                except ValueError:
+                    state = {}
+                now = clock()
+                recent = [t for t in state.get(kind, []) if now-60 < t <= now+1]
+                if len(recent) < SHARED_LIMITS[kind]:
+                    recent.append(now)
+                    state[kind] = recent
+                    handle.seek(0)
+                    handle.truncate()
+                    handle.write(json.dumps(state))
+                    handle.flush()
+                    return
+                wait = min(recent)+60-now
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+        sleep(max(0.05, min(wait, 1.0)))
+
+
 class HTTP:
     HOSTS = {'https://sig.thesuper.market/api/v1',
              'https://external-api.kalshi.com/trade-api/v2',
@@ -85,6 +125,8 @@ class HTTP:
         if self.key:
             attr, interval = ('last_read', 0.8) if method == 'GET' else ('last_write', 2.2)
             time.sleep(max(0, getattr(self, attr) + interval - time.monotonic()))
+            # Every process using this runtime shares one per-account budget (see shared_slot).
+            shared_slot('read' if method == 'GET' else 'write')
             setattr(self, attr, time.monotonic())
             if method == 'GET':
                 self.read_times.append(time.monotonic())

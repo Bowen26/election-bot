@@ -52,3 +52,34 @@ class SigReadRetryTests(unittest.TestCase):
             with patch('election_bot.clients.time.sleep'), self.assertRaises(APIError):
                 sig.read('/x')
             self.assertEqual(sig.http.request.call_count, 1)
+
+
+class SharedRateLimitTests(unittest.TestCase):
+    def test_budget_is_shared_through_the_file_and_waits_when_full(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        import election_bot.clients as clients
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        now = [1000.0]
+        sleeps = []
+        def sleep(seconds):
+            sleeps.append(seconds)
+            now[0] += seconds
+        with patch.object(clients, 'SHARED_RATE_FILE', Path(temp.name)/'sig-rate.json'), \
+             patch.object(clients, 'SHARED_LIMITS', {'read': 3, 'write': 1}):
+            for _ in range(3):
+                clients.shared_slot('read', sleep, lambda: now[0])
+            self.assertEqual(sleeps, [])
+            clients.shared_slot('write', sleep, lambda: now[0])     # separate budget
+            now[0] += 30
+            clients.shared_slot('read', sleep, lambda: now[0])      # full: waits until the oldest ages out
+            self.assertGreaterEqual(now[0], 1060)
+            self.assertTrue(sleeps)
+
+    def test_no_file_means_no_limit(self):
+        from unittest.mock import patch
+        import election_bot.clients as clients
+        with patch.object(clients, 'SHARED_RATE_FILE', None):
+            clients.shared_slot('read', sleep=lambda s: self.fail('should not wait'))

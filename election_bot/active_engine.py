@@ -30,8 +30,8 @@ class ReservationRejected(ValueError):
         self.gate = gate
 
 
-class BasketOrderUnresolved(Exception):
-    """A basket leg was sent (or may have been); its original error must reach recovery."""
+class OrderUnresolved(Exception):
+    """An order was sent (or may have been); its original error must reach recovery."""
     def __init__(self, error):
         super().__init__(str(error))
         self.original = error
@@ -252,6 +252,31 @@ class ActiveEngine(Engine):
                 return reason
         return None
 
+    def send_order(self, payload, reserve, patient_mapping=None):
+        """The one live placement path for every route: place, record the response, reconcile.
+
+        A clock failure before the POST records a zero fill. Any error once the order was
+        (or may have been) sent is wrapped in OrderUnresolved so no caller can skip past it;
+        callers re-raise the original error for the supervisor's recovery handling.
+        """
+        fee = D(self.config['strategy']['cost_buffer_per_share'])
+        try:
+            response = self.sig.place(payload)
+        except SubmissionClockUnavailable:
+            self.gate_block('submission_clock', 'pre_submit', payload['exchangeId'])
+            # No POST was attempted; record zero fill atomically, never a guessed fill.
+            self.ledger.record(payload, 0, 0, fee)
+            self.report('order_not_submitted', {'exchange': payload['exchangeId'],
+                'order_key': payload['idempotencyKey'], 'reason': 'clock_sample_unavailable'})
+            raise
+        except BaseException as error:
+            raise OrderUnresolved(error) from error
+        try:
+            self.journal.response(payload['idempotencyKey'], response)
+            self.finish(payload['idempotencyKey'], payload, response, reserve, patient_mapping=patient_mapping)
+        except BaseException as error:
+            raise OrderUnresolved(error) from error
+
     def submit_basket_leg(self, mapping, role, price, quantity, account, positions):
         """One NO buy through the normal reservation/placement/reconciliation path. Returns shares filled."""
         from .pair_baskets import REASON
@@ -271,19 +296,7 @@ class ActiveEngine(Engine):
                                'price': str(price), 'quantity': int(quantity), 'action': 'buy',
                                'reason': REASON, 'basket_role': role})
         if self.live:
-            try:
-                response = self.sig.place(payload)
-            except SubmissionClockUnavailable:
-                self.ledger.record(payload, 0, 0, fee)
-                raise
-            except BaseException as error:
-                # Sent or possibly sent: never let the basket loop skip past it.
-                raise BasketOrderUnresolved(error) from error
-            self.journal.response(payload['idempotencyKey'], response)
-            try:
-                self.finish(payload['idempotencyKey'], payload, response, reserve)
-            except BaseException as error:
-                raise BasketOrderUnresolved(error) from error
+            self.send_order(payload, reserve)
         else:
             self.ledger.record(payload, int(quantity), D(price), fee)
             self.report('paper_fill', {'exchange': exchange, 'side': 'no', 'price': str(price),
@@ -386,7 +399,7 @@ class ActiveEngine(Engine):
                     continue
                 size = int(min(filled, fresh.bids[0][1]*policy['depth_fraction']))
                 detail['second_filled'] = self.submit_basket_leg(legs[second], second, price, size, account, positions) if size >= 1 else 0
-            except BasketOrderUnresolved as error:
+            except OrderUnresolved as error:
                 # Same handling as an unresolved ordinary order: recovery, retry or halt.
                 detail['halt'] = 'basket order unresolved: '+str(error)[:160]
                 raise error.original
@@ -472,10 +485,13 @@ class ActiveEngine(Engine):
         """Recheck local limits under the same write lock as the reservation."""
         drawdown_rejected = False
         position_rejected = None
-        from .pair_baskets import REASON as PAIR
+        from .pair_baskets import REASON as PAIR, SWAP
         basket = exit_reason == PAIR
+        swap = exit_reason == SWAP
         if basket and (basket_context is None or payload['action'] != 'buy' or payload['side'] != 'no'):
             raise ReservationRejected('Basket legs are NO buys with basket context', gate='pair_basket')
+        if swap and (basket_context is None or payload['action'] != 'sell' or payload['side'] != 'yes'):
+            raise ReservationRejected('Swap sales are YES sells with basket context', gate='pair_basket')
         def guard():
             nonlocal drawdown_rejected, position_rejected
             self.ledger.inventory(refresh=True)  # Include any newly committed execution.
@@ -483,8 +499,8 @@ class ActiveEngine(Engine):
             if self.ledger.missing():
                 raise RuntimeError('Unimported executions block reservation')
             exchange = payload['exchangeId']
-            # Both legs of a basket are in one race; the second must not wait out the race cooldown.
-            if not basket and time.time()-self.races.last_order(self.journal, exchange) < self.config['cooldown_seconds']:
+            # Both legs of a basket/swap are in one race; the second must not wait out the race cooldown.
+            if not (basket or swap) and time.time()-self.races.last_order(self.journal, exchange) < self.config['cooldown_seconds']:
                 raise ReservationRejected('Race cooldown changed before reservation', gate='race_cooldown')
             expected = D(payload['quantity']) * (D(payload['price']) + D(self.config['strategy']['cost_buffer_per_share']))
             if D(reserve) != expected:
@@ -1314,17 +1330,10 @@ class ActiveEngine(Engine):
                                    'snapshot_id': self.latest_snapshot_id, **vars(signal)})
             if self.live:
                 try:
-                    response = self.sig.place(payload)
-                except SubmissionClockUnavailable:
-                    self.gate_block('submission_clock', 'pre_submit', exchange)
-                    # No POST was attempted; record zero fill atomically, never a guessed fill.
-                    self.ledger.record(payload, 0, 0, fee)
-                    self.report('order_not_submitted', {'exchange': exchange,
-                        'order_key': payload['idempotencyKey'], 'reason': 'clock_sample_unavailable'})
-                    raise
-                self.journal.response(payload['idempotencyKey'], response)
-                self.finish(payload['idempotencyKey'], payload, response, reserve,
-                            patient_mapping=mapping if signal.reason=='patient_entry' else None)
+                    self.send_order(payload, reserve,
+                                    patient_mapping=mapping if signal.reason=='patient_entry' else None)
+                except OrderUnresolved as error:
+                    raise error.original  # Unchanged recovery/retry/halt handling for the supervisor.
             else:
                 # A resting limit cannot be assumed to fill just because it was proposed.
                 paper_quantity = 0 if signal.reason == 'patient_entry' else signal.quantity

@@ -145,7 +145,9 @@ class Drawdown:
         ''')
         with self.db:self.db.execute('INSERT OR IGNORE INTO drawdown_fair_state VALUES (1,?,?,?)',('0',0,time.time()))
         with self.db:self.db.execute('INSERT OR IGNORE INTO drawdown_state VALUES (1,?,?,?,?)',('0',0,time.time(),str(self.fee)))
-        if D(self.db.execute('SELECT exit_buffer FROM drawdown_state WHERE id=1').fetchone()[0])!=self.fee:
+        # The bid-based peak was measured net of this buffer; fair-value mode uses no buffer.
+        if (self.policy['valuation']=='sig_bid' and
+                D(self.db.execute('SELECT exit_buffer FROM drawdown_state WHERE id=1').fetchone()[0])!=self.fee):
             raise ValueError('Drawdown exit buffer changed; valuation baseline requires review')
 
     @property

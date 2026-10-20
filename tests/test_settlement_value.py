@@ -287,3 +287,22 @@ class FairFallbackTests(unittest.TestCase):
         g.observe('2', Book.make([('.55', 200)], [('.57', 200)]),
                   [ref('.60', '.62'), ref('.60', '.62', venue='Polymarket')])
         self.assertEqual(g.status()['marks'][0]['basis'], 'reference_fair')
+
+
+class BufferChangeTests(unittest.TestCase):
+    def test_fair_mode_starts_after_buffer_change_but_bid_mode_still_refuses(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        j = Journal(Path(temp.name)/'live.sqlite3', 'test')
+        self.addCleanup(j.close)
+        l = Ledger(j)
+        c, _, _ = fixture()
+        c['execution'] = dict(test_active.EXECUTION)
+        c['drawdown_control'] = dict(DEFAULTS, enabled=True)
+        Drawdown(l, c)                                        # records buffer .01
+        changed = copy.deepcopy(c)
+        changed['strategy']['cost_buffer_per_share'] = '0.005'
+        with self.assertRaisesRegex(ValueError, 'exit buffer changed'):
+            Drawdown(l, changed)
+        changed['drawdown_control']['valuation'] = 'reference_fair'
+        Drawdown(l, changed)                                  # no error in fair-value mode
