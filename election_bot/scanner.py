@@ -12,7 +12,7 @@ INTEREST_TTL_SECONDS = 180
 PRICE_COMPARISON_SECONDS = 300
 REFERENCE_MOVE = D('.02')
 NEAR_ENTRY_MARGIN = D('.02')
-INTEREST_SCORES = {'near_entry': 200, 'reference_move': 180, 'owned_position': 100}
+INTEREST_SCORES = {'election_night': 250, 'near_entry': 200, 'reference_move': 180, 'owned_position': 100}
 
 
 class ScanInterest:
@@ -24,6 +24,11 @@ class ScanInterest:
     def invalidate(self, name):
         self.watches.pop(name, None)
         self.previous.pop(name, None)
+
+    def flag(self, name, reason, now=None):
+        """Keep a race on the priority lane for one interest period."""
+        now = time.time() if now is None else now
+        self.watches.setdefault(name, {})[reason] = now + INTEREST_TTL_SECONDS
 
     def observe(self, name, diagnostics, refs, settings, held, now=None):
         now = time.time() if now is None else now

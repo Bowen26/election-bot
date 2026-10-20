@@ -52,3 +52,12 @@ python3 -m election_bot drawdown-status --paper
 The command uses the current configuration file and retained marks. It does not update the persisted peak, change pause state, clear STOP or prove the worker is alive. `not_initialized` means the upgraded worker has not created the tables yet. Worker events named `drawdown_control` expose measured P&L, peak, drawdown, missing marks and pause state. `drawdown_mark_skip` records failed refreshes. Decision diagnostics and reservation rejections explain blocked buys.
 
 This increment does not introduce a stop-loss sale, a declining-position entry rule, capital rotation, or any change to the profit-taking strategy. Those are separate follow-up implementations.
+
+
+## Recovery visibility
+
+The peak is a persistent high-water mark, not a rolling or decaying peak. There is no timeout. A paused portfolio can remain paused indefinitely, especially if it has crystallized losses and no open positions remain to recover. Exits stay eligible under their existing controls; selling alone does not reset the peak or erase realized losses.
+
+Status now explicitly reports `peak_policy`, `automatic_timeout`, `resume_requires_portfolio_pnl_above` and `recovery_gap_coins`. The target is a strict inequality: with a 3,000 peak and a 1,250 resume threshold, portfolio P&L must rise **above 1,750**. At exactly that target the remaining gap is zero but buying remains paused. Incomplete marks leave the recovery gap unknown. These fields do not modify the pause/resume policy or reset existing history.
+
+Changing to a decaying peak or timed resumption would permit new buys without recovery and requires a separate policy decision. A cap proportional to deployed capital has different behavior as positions are sold or capital is deployed; it is not an automatic substitute for this high-water rule. The existing approved 2,500/1,250 coin thresholds remain in place.

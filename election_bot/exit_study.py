@@ -166,7 +166,7 @@ def report(path, now=None, hours=24):
         if not db.execute("SELECT 1 FROM sqlite_master WHERE name='events' AND type='table'").fetchone():
             return base
         since = now-hours*3600
-        quotes, quote_counts = load_events(db, since, now)
+        quotes, quote_counts = load_events(db, since, now, include_followups=True)
         studies, counts = _read_studies(db, since, now)
     finally:
         db.close()

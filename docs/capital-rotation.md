@@ -63,3 +63,93 @@ Use `--paper` for the paper journal. Reports are read-only, require no credentia
 ```
 
 No live rotation switch exists in this implementation. Broader polling inputs, model calibration, separate candidate-portfolio replay and evidence-based live promotion remain later increments.
+
+
+## Independent-model ranking and sequential rotation trials
+
+A separate `independent_rotation_v1` study now runs alongside the original external-bid study when `rotation_study.enabled` is true. It adds no network requests or live orders and uses the configured primary independent polling forecast. It reads validated polling evidence and collector health through the same read-only forecast loader as the live model. It does not consume or enlarge the live model's purchase allowance. Missing/sparse polling, failed collector health and changed bindings cannot fall back to exchange prices or an invented model value.
+
+### Ranking and confirmation
+
+The latest portfolio ranking includes all currently fresh, model-covered contracts in the scan cache, not just comparisons involving the last scanned race. It lists owned positions by upper-scenario remaining value over an immediate sale; prospective buys by lower-scenario edge after both buffers per purchase coin; and fully sized hold-versus-switch candidates by total conservative improvement in coins. Quote/model age is at most 15 seconds (or a stricter configured SIG quote age), SIG spread at most 4¢, and prices must satisfy SIG ticks. This is a partial fresh view, not simultaneous coverage of all enabled races. Ranking age and coverage are shown explicitly.
+
+The **holding** comparison uses the source side's upper sensitivity value, while the destination uses its lower sensitivity value. Both YES and NO are oriented to their own contract. Those scenarios remain uncalibrated, not statistical confidence bounds or predictions of near-term repricing. Remaining opportunity determines ranking; an accumulated profit threshold does not itself request a sale. A high remaining source value can reject a switch even when a destination is independently attractive.
+
+A candidate must improve on holding by the existing rotation improvement fraction (3% of net proceeds by default), after source sale, target entry and future exit buffers. It must qualify on three observations at least 60 seconds apart, spanning at least 120 seconds, with no observation gap over 180 seconds. Both quote snapshot IDs must change before confirmation advances. Polling-evidence hashes, race-version hashes, forecast policy or execution-epoch changes reset the chain. Known reversals and buy/news/race pauses invalidate confirmation. Confirmation survives restarts; the quote cache does not.
+
+### Capital and sequential execution assumptions
+
+The source is bot-owned and the destination race is unowned. Gross-exposure contracts and same-race switches are excluded. Each simulated source sale is limited to 25% of holdings, 25% of top-bid depth and existing order/share/exposure limits. A copied FIFO sale supplies the hypothetical realized P&L and post-sale capital/exposure checks. Cash already committed to live pending orders blocks new trials. Existing buy pauses, race cooldowns and news gates remain collection constraints.
+
+The simulated purchase is funded **only by that trial's net sale proceeds**, also capped at the released source FIFO basis. It cannot reinvest a simulated sale profit beyond that basis. Other trials' same-day purchases and pending purchase allowances count against the current gross daily allowance, alongside actual journal spending. Source and destination races cannot overlap another trial through its longest outcome window (75 minutes), or a longer configured cooldown. These restrictions prevent concurrent trials reusing the same source holdings or simulated daily allowance. They are conservative research constraints, not changes to live accounting.
+
+After confirmation, the study records a hypothetical source sale at the displayed bid. It then waits up to 60 seconds for a **new destination observation with both quote timestamps after that sale**. It cannot buy from the cached quote that justified the proposal. The first such observation rechecks source and destination forecasts, inventory epoch, bindings, buy/news gates, capital, daily allowance, exposure, depth, price gap and hold-versus-switch improvement. It may resize downward to the new executable quantity. Failure or expiration leaves the simulated proceeds as cash; it cannot select a later more favorable quote. A real intervening execution also prevents the pending hypothetical purchase.
+
+The sale itself is an assumed displayed fill, not a real confirmed execution. Actual live rotation would still need verified sale fills, exchange rejection handling and purchase revalidation. No live rotation execution switch has been introduced.
+
+### Forward outcomes and use
+
+At 15 minutes and one hour from the simulated sale, compare the actual simulated destination quantity plus residual cash against retaining the same source shares. Cash-only trials require only the source holding's comparison quote. The first valid post-horizon quote is final, including insufficient depth; exit sizing uses the same 25% top-depth allowance. Two traded legs must be observed within two minutes. Missing, pending, insufficient-depth and unaligned results stay separate from measured coin differences. No old observations are backfilled.
+
+These are **capital-constrained paired trials, not a continuous portfolio backtest**. Later trials use the bot's then-current owned inventory rather than rolling a synthetic full portfolio forward. Do not sum their overlapping horizon means into total profit. Forecasts concern election settlement, which may differ from competition-period marks and exit timing. Displayed fills omit real queue priority, latency, partial fills, impact and exchange failure. The report flags cash-budget-fundable destinations: a profitable-looking switch does not establish that selling was necessary, and the prospective spare-cash comparison below separately checks whether the same purchase can be funded without that sale.
+
+Stop the existing watcher with Ctrl+C, wait for its prompt, then restart once:
+
+```sh
+python3 -m election_bot watch --live
+```
+
+Read both studies without modifying state:
+
+```sh
+python3 -m election_bot rotation-study --hours 24
+python3 -m election_bot rotation-study --hours 24 --json
+```
+
+JSON exposes `independent_model.latest_ranking`, confirmation counts, purchase outcomes and the most recent trials. The original external-price results remain separate and unchanged. No new key, fundamentals import, live haircut activation or trading-limit change is required. Research tables use the `model_rotation_` prefix in the existing live/paper journal. Frozen study-policy changes require a separate reviewed experiment rather than resetting accumulated evidence.
+
+
+### Hold, cash and replacement attribution
+
+The report now compares three choices on the same complete 15-minute/one-hour observations: keep the source shares, sell them and retain net proceeds as cash, or follow the simulated rotation policy. Cash earns no interest. All three start with the same source inventory; the cash baseline includes the source sale buffer, and replacement value includes purchase and liquidation buffers.
+
+`allocation_attribution` separates `mean_exit_vs_hold_coins` from `mean_reinvestment_vs_cash_coins`. Their sum equals `mean_rotation_vs_hold_coins` (apart from decimal mean rounding). A rotation can beat holding while still losing to cash: that supports the exit decision, not the destination selection. Cash-only trials have zero reinvestment contribution and are separated from completed purchases. Exact terminal-value ties are reported explicitly.
+
+Results include all measured trials, purchased trials, cash-only trials, and the original proposal's cash-budget-fundable/not-fundable cohorts. The fundability label is a budget screen, not a fully validated direct-buy alternative. Cohorts overlap; do not add their counts or returns. Every comparison uses identical complete, aligned, sufficiently deep observations; missing outcomes never become zero. Best-choice counts are hindsight diagnostics, not live trading rules or evidence of calibrated expected returns.
+
+This is a read-only report extension over existing prospective trials, with no schema, study-policy, order, limit or collection changes. Existing collected outcomes work immediately without restarting the watcher. It remains a paired trial study rather than a continuous portfolio replay; the paired spare-cash comparison below adds a direct-buy alternative, while a continuous portfolio simulation is still needed before claiming optimal allocation.
+
+
+### Prospective spare-cash comparison
+
+New independent-model trials also record a `spare_cash_v1` comparison. At proposal time the trial freezes available account cash. When its first fresh destination quote produces a simulated rotation purchase, the comparison checks whether that **same quantity at the same price** could instead be purchased while retaining the source. It uses the smaller of proposal-time and purchase-time cash, unchanged live source inventory, total and race capital, directional exposure, daily gross-buy allowance including other trials, per-order limits and the realized-loss stop. It does not credit the hypothetical sale's proceeds or released exposure. Shared quote, depth, model, news, binding and inventory-epoch checks already passed for the rotation purchase. The comparison does not reserve real funds, make additional API requests or place orders.
+
+Only prospective, eligible purchases enter `direct_buy_attribution` in each horizon of the independent-model report. All four alternatives start with the **same source shares plus the same initial spare cash**:
+
+- Hold source and cash.
+- Sell source and keep all cash.
+- Sell source, buy the target, and keep residual cash.
+- Hold source, buy the same target using spare cash, and keep residual cash.
+
+The direct-buy alternative uses the same target fill and complete, aligned source/target liquidation observations as the rotation. Both purchase and liquidation buffers are included. `mean_direct_buy_vs_hold_and_cash_coins` measures the target investment's contribution; `mean_direct_buy_vs_rotation_coins` measures the effect of retaining the source instead of selling it. A positive second figure alone does not establish that the new purchase made money. Best-choice counts are hindsight comparisons with explicit ties.
+
+`direct_buy_eligibility` reports reasons for exclusions. Legacy trials are not backfilled. Pending trials, failed rotation purchases, insufficient cash/exposure and missing or thin outcome observations do not become zero-return measurements. This is conditional on qualifying rotation purchases, so it does not discover standalone direct-buy opportunities or compare different purchase sizes. The arms are alternatives, not simultaneous allocations; results are not additive portfolio profits. Full prospective portfolio replay and live capital rotation remain separate work.
+
+Restart the watcher once to collect new comparisons. The existing read-only `python3 -m election_bot rotation-study --hours 24 --json` command includes the results. No live policy or limits change.
+
+### Opportunity diagnostics
+
+The independent-model report now includes `opportunity_diagnostics`, with exact rolling-window counts and per-contract/race breakdowns. This explains why prospective comparisons are not being created without relaxing eligibility. Categories distinguish pending orders, buy pauses, disabled/gross mappings, news or race cooldowns, SIG freshness/spread/tick failures, missing race bindings, collector health, insufficient independent pollsters, no recent poll, and other evidence/validation failures. Unknown exception text is not stored in the diagnostic table.
+
+For observations that pass quote and forecast validation, the report counts `model_and_quote_ready`, then records whether the fresh cache lacks an owned source, lacks an unowned destination, has no qualifying pair after the existing limits and edge checks, is awaiting confirmation, or creates a trial. The last category does not imply a real order. Pair-level reasons describe the cache at that observation; they are not a rejection of only the named race. The combined limits/edge category does not yet isolate every individual sizing constraint.
+
+These are observations reaching the model-rotation hook, not all scanner visits, distinct opportunities or rejected trades. An observation appears in `observed` and may also appear in a ready stage and final outcome; do not sum those counts as independent failures. Only the first blocking gate is recorded. Existing cumulative activity counters remain separate from these windowed counts. Old activity is not reconstructed into new categories. First/last observation timestamps show actual coverage, and no rows means no diagnostic evidence, not proof of no opportunities. Seven days are retained, with hourly pruning during collection.
+
+After one watcher restart, use:
+
+```sh
+python3 -m election_bot rotation-study --hours 24
+python3 -m election_bot rotation-study --hours 24 --json
+```
+
+The text report shows aggregate counts; JSON includes the per-race breakdown. Reading a legacy journal does not create tables or start collection. This instrumentation changes no order policy, budget, confirmation requirement or model gate and makes no additional network requests.

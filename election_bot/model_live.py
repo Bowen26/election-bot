@@ -12,7 +12,7 @@ from .strategy import D, Signal, choose
 REASON = 'model_fair_value'
 DEFAULTS = dict(enabled=False, acknowledge_uncalibrated=False,
     total='1000', daily='250', per_race='250', per_order='25',
-    minimum_edge='.08', max_shares=50, depth_fraction='.25', max_sig_spread='.04',
+    minimum_probability_haircut='0', minimum_edge='.08', max_shares=50, depth_fraction='.25', max_sig_spread='.04',
     min_price='.10', max_price='.90', max_collector_age_seconds=7200)
 
 
@@ -25,7 +25,9 @@ def settings(config):
         if type(p[k]) is not bool:raise ValueError('model_trading '+k+' must be boolean')
     for k in set(p)-{'enabled','acknowledge_uncalibrated'}:
         p[k]=D(p[k])
-        if p[k]<=0:raise ValueError('model_trading '+k+' must be positive')
+        if k == 'minimum_probability_haircut':
+            if not 0 <= p[k] <= D('.25'):raise ValueError('Model probability haircut must be between 0 and .25')
+        elif p[k]<=0:raise ValueError('model_trading '+k+' must be positive')
     if not 0 < p['min_price'] < p['max_price'] < 1:raise ValueError('Invalid model price range')
     if not D('.05') <= p['minimum_edge'] < 1:raise ValueError('Model edge must be at least five cents')
     if p['depth_fraction']>1 or p['max_sig_spread']>=1:raise ValueError('Invalid model depth/spread')
@@ -79,23 +81,42 @@ def forecast(runtime, mapping, config, now, p):
                 race['race_key']!=mapping.get('race_key')):
             raise ValueError('model_requires_reviewed_single_contract_senate')
         race=validate_race(race,{mapping['sig_exchange_id']:mapping})
-        polls=[validate_poll(r) for r in store.latest('poll',now) if r['race_key']==race['race_key']]
+        # Research-only bindings and research-tier polls never reach live forecasts.
+        if race.get('live_model_eligible') is False:raise ValueError('model_race_research_only')
+        polls=[validate_poll(r) for r in store.latest('poll',now)
+               if r['race_key']==race['race_key'] and r.get('live_model_eligible',True) is not False]
         result=estimate(race,polls,now)
         if result['status']!='estimated':raise ValueError('model_'+result['reason'])
         return result
     finally:store.close()
 
 
-def select(book, refs, strategy, execution, prediction, p, available, held, side_limits=None):
-    # Keep venue health gates, but do not require an external price discount.
-    choose(book,refs,strategy,0)
+def execution_bounds(prediction, p):
+    """Optional absolute probability haircut, not an empirical confidence bound."""
     if prediction.get('status')!='estimated' or prediction.get('version')!=MODEL_VERSION:
         raise ValueError('Invalid model forecast')
     low,mean,high=(D(prediction[k]) for k in ('yes_low','yes_probability','yes_high'))
     if not 0<=low<=mean<=high<=1:raise ValueError('Invalid model probability range')
+    floor=D(p.get('minimum_probability_haircut','0'))
+    if not 0<=floor<=D('.25'):raise ValueError('Invalid probability haircut')
+    result={}
+    for side,point,sensitivity in [('yes',mean,low),('no',1-mean,1-high)]:
+        bound=max(D(0),min(sensitivity,point-floor))
+        result[side]={'point_probability':point,'sensitivity_bound':sensitivity,
+                      'sensitivity_haircut':point-sensitivity,'execution_bound':bound,
+                      'execution_haircut':point-bound,'minimum_probability_haircut':floor,
+                      'floor_binding':bound<sensitivity}
+    return result
+
+
+def select(book, refs, strategy, execution, prediction, p, available, held, side_limits=None):
+    # Keep venue health gates, but do not require an external price discount.
+    choose(book,refs,strategy,0)
+    bounds=execution_bounds(prediction,p)
     fee=D(strategy['cost_buffer_per_share']);candidates=[]
     threshold=max(p['minimum_edge'],D(strategy['minimum_edge']))
-    for side,value,bound in [('yes',mean,low),('no',1-mean,1-high)]:
+    for side,values in bounds.items():
+        bound=values['execution_bound']
         if held and ((held<0)!=(side=='no')):continue
         target=book if side=='yes' else book.complement()
         aligned=refs if side=='yes' else [r.complement() for r in refs]
@@ -123,6 +144,7 @@ def propose(runtime, mapping, config, db, book, refs, strategy, available, held,
         detail.update(used=used,available=min(D(available),cap))
         if cap<=0 or D(available)<=0:return None,dict(detail,reason='model_or_portfolio_budget')
         f=forecast(runtime,mapping,config,now,p)
+        detail['execution_bounds']=execution_bounds(f,p)
         signal=select(book,refs,strategy,config['execution'],f,p,min(D(available),cap),held,side_limits)
         detail.update(forecast=f,contract_fingerprint=mapping['contract_fingerprint'],
                       settings={k:str(v) if not isinstance(v,bool) else v for k,v in p.items()},

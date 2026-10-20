@@ -48,3 +48,12 @@ Start only one supervisor. A running Python worker must restart to load the code
 ## Measuring this pilot
 
 `python3 -m election_bot strategy-performance` separates confirmed model purchases, FIFO-attributed realized profit, remaining cost, pending reservations and unused pilot allowance from other entries. Use `--json` for per-race figures and full markout coverage. It also explains recent model blocks by scan/preflight phase. The [report methodology](strategy-performance.md) describes mixed-route inventory, cost assumptions and limitations. Running the report requires no worker restart.
+
+
+## Tail sensitivity and optional execution haircut
+
+The polling model's `yes_low`/`yes_high` are two-margin-point sensitivity scenarios, not calibrated confidence bounds. In the normal distribution's tails, their probability distance from the point estimate becomes tiny and can eventually round to zero. There is no universal +18-point collapse boundary; it depends on predictive uncertainty. More numerically stable tail arithmetic alone would not provide a meaningful probability haircut.
+
+The live adapter now supports `model_trading.minimum_probability_haircut`, an absolute probability deduction between 0 and .25. The backward-compatible default is **0 (disabled)**. With an explicitly selected .05 setting, each purchase-side execution bound is `max(0, min(original_sensitivity_bound, side_point_probability - .05))`. YES and NO are handled symmetrically. Existing stronger sensitivity deductions remain intact, and both entry and exit cost buffers still apply afterward. This is an operational conservative rule, not a fitted confidence level or a revised forecast.
+
+`model_decision` diagnostics and reserved model-order attribution now include point probability, original sensitivity bound/haircut, effective execution bound/haircut and whether the floor binds. The same calculation runs at scan, preflight and under the reservation lock. The primary research forecast and historical comparisons remain unchanged. Existing configurations retain their current behavior until a nonzero haircut is selected; no pilot budget increase accompanies this option.

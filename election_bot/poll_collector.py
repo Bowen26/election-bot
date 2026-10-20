@@ -95,15 +95,26 @@ def collect(runtime, config, *, force=False, now=None, stopped=lambda: False, fe
         save(directory/'status.json', result)
         store = None
         try:
-            batches, sources = {}, []
+            batches, sources, failures = {}, [], []
             for office in OFFICES:
                 if stopped():
                     raise CollectionStopped()
-                url, rows = fetcher(office, began, stopped)
-                if not isinstance(rows, list) or len(rows) > 5000:
-                    raise ValueError('Invalid provider rows')
-                batches[office] = rows
-                sources.append(dict(url=url, office=office, rows=len(rows)))
+                try:
+                    url, rows = fetcher(office, began, stopped)
+                    if not isinstance(rows, list) or len(rows) > 5000:
+                        raise ValueError('Invalid provider rows')
+                    batches[office] = rows
+                    sources.append(dict(url=url, office=office, rows=len(rows), status='ok'))
+                except CollectionStopped:
+                    raise
+                except Exception as error:
+                    failures.append(dict(office=office,status='error',error_type=type(error).__name__))
+            result.update(source_failures=failures, sources=sources,
+                          model_input_office='us-senator', partial_collection=bool(failures))
+            # Only the Senate feed enters the current live model. Never treat its
+            # failure as healthy, but unrelated staging outages must not block it.
+            if 'us-senator' not in batches:
+                raise ValueError('Senate collection failed; model inputs not refreshed')
             received = time.time() if now is None else now
             if received < began:
                 raise ValueError('Clock moved backwards while collecting')
@@ -141,7 +152,8 @@ def collect(runtime, config, *, force=False, now=None, stopped=lambda: False, fe
                 bound_contracts=len(evidence['races']), accepted_polls=len(audit['accepted_poll_ids']),
                 withdrawn_polls=len(audit['withdrawn_poll_ids']), rejected_rows=len(quarantine),
                 rejection_reasons=dict(Counter(r['reason'] for r in quarantine)),
-                staged_only_offices=['governor', 'us-representative'], ingestion=ingested,
+                staged_only_offices=[o for o in ('governor','us-representative') if o in batches], ingestion=ingested,
+                coverage_scope='Senate ingestion healthy; see source_failures for auxiliary staging outages',
                 audit_file=str(audit_path), raw_file=str(raw_path))
         except CollectionStopped:
             result.update(status='stopped')

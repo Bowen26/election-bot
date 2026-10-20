@@ -227,11 +227,13 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(result['last_success_at'],T)
         self.assertEqual(self.latest(),previous)
 
-    def test_governor_failure_does_not_partially_import(self):
-        call=Mock(side_effect=[('https://api.votehub.com/polls',[row()]),TimeoutError()])
+    def test_auxiliary_failure_preserves_valid_senate_collection(self):
+        call=Mock(side_effect=[('https://api.votehub.com/polls',[row()]),TimeoutError(),('https://api.votehub.com/polls',[])])
         result=collect(self.root,self.config,force=True,now=T,fetcher=call)
-        self.assertEqual(result['status'],'error')
-        self.assertFalse((self.root/'fair-value.sqlite3').exists())
+        self.assertEqual(result['status'],'ok')
+        self.assertEqual(result['last_success_at'],T)
+        self.assertEqual(result['source_failures'],[{'office':'governor','status':'error','error_type':'TimeoutError'}])
+        self.assertEqual(len(self.latest()),1)
 
     def test_stop_during_fetch_does_not_import(self):
         flag=[False]

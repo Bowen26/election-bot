@@ -82,7 +82,7 @@ def report(runtime, config, paper=False, hours=24, now=None):
         if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='events'").fetchone():return result
         if not db.execute("SELECT 1 FROM events WHERE kind='fair_value_shadow' AND at>=? AND at<=? LIMIT 1",
                           (now-float(hours)*3600,now)).fetchone():return result
-        quotes,_=load_events(db,now-float(hours)*3600,now)
+        quotes,_=load_events(db,now-float(hours)*3600,now,include_followups=True)
         from .fair_pairs import analyze as analyze_pairs
         result['paired_priors']=analyze_pairs(db,quotes,now-float(hours)*3600,now)
         by_exchange=defaultdict(list)

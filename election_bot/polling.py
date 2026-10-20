@@ -61,6 +61,8 @@ def validate_race(raw, mappings):
         raise ValueError('Fair-value race must match the configured contract fingerprint and race')
     if r['yes_party'] not in ('DEM','REP') or r['contest_type'] != 'general_plurality':
         raise ValueError('Version 1 supports reviewed Democratic/Republican general plurality races only')
+    if type(r.get('live_model_eligible',True)) is not bool:
+        raise ValueError('live_model_eligible must be boolean')
     if r['dem_candidate'].casefold() == r['rep_candidate'].casefold():
         raise ValueError('Candidates must be different')
     if match.get('exposure_sign') != (1 if r['yes_party']=='DEM' else -1):
@@ -106,6 +108,8 @@ def validate_poll(raw):
     p['methodology'] = text(p['methodology'])
     if type(p.get('withdrawn',False)) is not bool:
         raise ValueError('withdrawn must be boolean')
+    if type(p.get('live_model_eligible',True)) is not bool:
+        raise ValueError('live_model_eligible must be boolean')
     return p
 
 

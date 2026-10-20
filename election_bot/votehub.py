@@ -12,6 +12,12 @@ from .polling import digest, number, source_url, text, validate_poll
 
 ATTRIBUTION = 'VoteHub (https://votehub.com/polls/api/), CC BY 4.0; normalized for research'
 CATALOG = {
+    '2026 Massachusetts': dict(state='MA', dem='Ed Markey', rep='John Deaton',
+        dem_aliases=('Ed Markey',), rep_aliases=('John Deaton',), zone='America/New_York',
+        source='https://scholars.unh.edu/survey_center_polls/1008/'),
+    '2026 Rhode Island': dict(state='RI', dem='Jack Reed', rep='Raymond McKay',
+        dem_aliases=('Jack Reed',), rep_aliases=('Raymond McKay',), zone='America/New_York',
+        source='https://scholars.unh.edu/survey_center_polls/1009/'),
     '2026 Michigan': dict(state='MI', dem='Abdul El-Sayed', rep='Mike Rogers',
         dem_aliases=('Abdul El-Sayed',), rep_aliases=('Mike Rogers',), zone='America/Detroit',
         source='https://emersoncollegepolling.com/michigan-2026-poll-el-sayed-and-rogers-locked-in-close-election/'),
@@ -30,7 +36,28 @@ CATALOG = {
     '2026 North Carolina': dict(state='NC', dem='Roy Cooper', rep='Michael Whatley',
         dem_aliases=('Roy Cooper',), rep_aliases=('Michael Whatley',), zone='America/New_York',
         source='https://surveyresearch-ecu.reportablenews.com/pr/ecu-poll-cooper-s-lead-holds-at-7-points'),
+    # Research-only bindings (live_model=False): estimates are recorded for research,
+    # but model_live refuses these races until a reviewer promotes them. Each is a
+    # two-party plurality general election with an enabled "Democrats win" contract.
+    '2026 Arkansas': dict(state='AR', dem='Hallie Shoffner', rep='Tom Cotton',
+        dem_aliases=('Hallie Shoffner',), rep_aliases=('Tom Cotton',), zone='America/Chicago', live_model=False,
+        source='https://arkansasadvocate.com/2026/03/03/shoffner-cotton-win-primaries-for-u-s-senate-seat-in-arkansas/'),
+    '2026 Minnesota': dict(state='MN', dem='Peggy Flanagan', rep='Michele Tafoya',
+        dem_aliases=('Peggy Flanagan',), rep_aliases=('Michele Tafoya',), zone='America/Chicago', live_model=False,
+        source='https://www.mprnews.org/2026/10/12/peggy-flanagan-michele-tafoya-senate-race-stays-quiet-in-minnesota'),
+    '2026 New Mexico': dict(state='NM', dem='Ben Ray Luján', rep='Larry Marker',
+        dem_aliases=('Ben Ray Luján', 'Ben Ray Lujan'), rep_aliases=('Larry Marker',), zone='America/Denver',
+        live_model=False, source='https://sourcenm.com/2026/09/11/new-mexico-election-2026-us-senator/'),
+    '2026 South Carolina': dict(state='SC', dem='Annie Andrews', rep='Darline Graham',
+        dem_aliases=('Annie Andrews',), rep_aliases=('Darline Graham',), zone='America/New_York', live_model=False,
+        source='https://www.live5news.com/2026/08/26/senate-candidates-dr-annie-andrews-kasie-whitener-react-result-republican-primary/'),
 }
+# Reviewed and deliberately not bound: the two-party plurality model does not apply.
+EXCLUDED = {'ME': 'ranked_choice_general', 'AK': 'ranked_choice_general', 'GA': 'majority_runoff',
+            'NE': 'independent_major_candidate', 'MT': 'three_way_contest',
+            'MS': 'runoff_rules_unreviewed',
+            # Earlier review kept Kansas unbound; nominee identity is not yet confirmed from certified results.
+            'KS': 'prior_review_unbound_nominee_unconfirmed'}
 # New labels require panel-family review instead of manufacturing independence.
 POLLSTERS = {name.casefold(): family for name, family in (
     ('University of Massachusetts Lowell Center for Public Opinion/YouGov', 'yougov'),
@@ -43,6 +70,25 @@ POLLSTERS = {name.casefold(): family for name, family in (
     ('Big Data Poll', 'big data poll'), ('Marist University', 'marist'),
     ('Beacon Research/Shaw & Co. Research', 'beacon research/shaw & co. research'),
     ('CNN/SSRS', 'ssrs'), ('co/efficient', 'co/efficient'))}
+# Research tier: nonpartisan media/academic pollsters reviewed for family only.
+# Their polls feed research estimates but are excluded from live model forecasts.
+# Families join existing ones where the panel or sponsor overlaps, so a co-branded
+# release never counts as an extra independent pollster.
+RESEARCH_POLLSTERS = {name.casefold(): family for name, family in (
+    ('ReconMR/Siena University', 'siena university'),
+    ('Bowling Green State University/YouGov', 'yougov'),
+    ('Cygnal/Beacon Research', 'beacon research/shaw & co. research'),
+    ('SurveyUSA', 'surveyusa'), ('Suffolk University', 'suffolk university'),
+    ('The Washington Post/George Mason University School of Policy and Government', 'washington post'),
+    ('MassINC Polling Group', 'massinc polling group'), ('Hendrix College', 'hendrix college'),
+    ('Mitchell Research & Communications', 'mitchell research'),
+    ('Texas Southern University Barbara Jordan Public Policy Research and Survey Center', 'texas southern university'),
+    ('Stetson University Center for Public Opinion Research', 'stetson university'))}
+
+
+def rounding_tolerance(values):
+    """Largest total explainable by each published share being rounded."""
+    return sum(.5 if float(v).is_integer() else .05 for v in values)
 
 
 def iso(at):
@@ -70,6 +116,10 @@ def bindings(config):
                 election_at=datetime(2026, 11, 3, tzinfo=ZoneInfo(spec['zone'])).isoformat(),
                 contest_type='general_plurality', source_url=spec['source'], prior=None,
                 notes='Research candidate binding only; not a live settlement attestation.'))
+            if spec.get('live_model', True) is False:
+                result[-1].update(live_model_eligible=False,
+                    notes='Research-only binding; live model forecasts refuse this race until promoted. '
+                          + spec.get('review_note', ''))
     return result
 
 
@@ -82,9 +132,16 @@ def normalize(row, available_races, now):
         raise ValueError('no_enabled_bound_contract')
     if row.get('internal') is not False or 'partisan' not in row or row['partisan'] is not None:
         raise ValueError('internal_partisan_or_unknown_flags')
-    pollster = POLLSTERS.get(text(row['pollster']).casefold())
+    research = []
+    if spec.get('live_model', True) is False:
+        research.append('research_only_race')
+    label = text(row['pollster']).casefold()
+    pollster = POLLSTERS.get(label)
     if not pollster:
-        raise ValueError('unreviewed_pollster_family')
+        pollster = RESEARCH_POLLSTERS.get(label)
+        if not pollster:
+            raise ValueError('unreviewed_pollster_family')
+        research.append('research_tier_pollster')
     zone = ZoneInfo(spec['zone'])
     start, end, created = (date_only(row[k]) for k in ('start_date', 'end_date', 'created_at'))
     if created > datetime.fromtimestamp(now, zone).date() or created < end:
@@ -103,7 +160,10 @@ def normalize(row, available_races, now):
             raise ValueError('duplicate_answer')
         values[choice] = number(answer['pct'], 0, 100)
     if sum(values.values()) > 100.5:
-        raise ValueError('answer_total_exceeds_100_5')
+        # Integer-rounded releases can legitimately total 101. Accept that for research only.
+        if sum(values.values()) > 100 + max(.5, rounding_tolerance(values.values())):
+            raise ValueError('answer_total_exceeds_rounding')
+        research.append('rounded_total_above_100_5')
     shares = []
     for aliases in (spec['dem_aliases'], spec['rep_aliases']):
         found = [values[a.casefold()] for a in aliases if a.casefold() in values]
@@ -111,7 +171,9 @@ def normalize(row, available_races, now):
             raise ValueError('candidate_identity_missing_or_ambiguous')
         shares.append(found[0])
     poll_id = 'votehub:' + text(row['id'])
-    return validate_poll(dict(poll_id=poll_id, survey_id=poll_id, pollster=pollster,
+    # Only research polls carry the flag, so existing live poll versions are unchanged.
+    tier = dict(live_model_eligible=False, research_reasons=research) if research else {}
+    return validate_poll(dict(**tier, poll_id=poll_id, survey_id=poll_id, pollster=pollster,
         race_key=race, dem_candidate=spec['dem'], rep_candidate=spec['rep'], stage='general',
         population=row['population'], partisan=None, sample_size=row['sample_size'],
         field_start=start.isoformat(), field_end=end.isoformat(), published_at=iso(now),
@@ -159,7 +221,9 @@ def adapt(rows, config, previous, now):
     # Repeated releases/subsamples from the same pollster and fieldwork are one survey.
     groups = defaultdict(list)
     for p in candidates.values():
-        groups[(p['race_key'], p['pollster'], p['field_start'], p['field_end'])].append(p)
+        # Research-tier rows never supersede or conflict with live-tier rows.
+        groups[(p['race_key'], p['pollster'], p['field_start'], p['field_end'],
+                p.get('live_model_eligible', True))].append(p)
     for group in groups.values():
         preferred = [p for p in group if p['population'] == 'lv'] or group
         signatures = {tuple(p[k] for k in ('population', 'sample_size', 'dem_pct', 'rep_pct', 'other_pct')) for p in preferred}

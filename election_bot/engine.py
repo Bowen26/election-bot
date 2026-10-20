@@ -25,6 +25,12 @@ def validate_config(config):
     risk_exit_settings(config)
     from .model_live import settings as model_settings
     model_settings(config)
+    from .research_followups import settings as followup_settings
+    followup_settings(config)
+    from .settlement_value import exit_settings
+    exit_settings(config)
+    from .election_night import settings as election_night_settings
+    election_night_settings(config)
     execution = config.get('execution', {})
     if execution.get('enabled'):
         if type(execution.get('priority_scanning', True)) is not bool:
@@ -98,6 +104,12 @@ def validate_config(config):
             raise ValueError('Enabled mapping names must be unique: ' + label)
         names.add(label)
     validate_risk_config(config)
+    from .patient_entry import settings as patient_settings
+    patient_settings(config)
+    from .entry_ranking import settings as ranking_settings
+    ranking_settings(config)
+    from .performance_throttle import enabled as throttle_settings
+    throttle_settings(config)
     if execution.get("enabled"):
         from .race_controls import configured_races
         configured_races(config)

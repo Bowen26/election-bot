@@ -44,8 +44,13 @@ def quote(raw, captured):
             'timestamp_basis': str(raw['timestamp_basis'])}
 
 
-def load_events(db, since, now):
-    """Exact snapshot identity only. Conflicting duplicates are all excluded."""
+def load_events(db, since, now, include_followups=False):
+    """Exact snapshot identity only. Conflicting duplicates are all excluded.
+
+    With include_followups, SIG-only research follow-up snapshots are returned as
+    outcome-only rows (never aligned, so never an entry anchor or reference input).
+    """
+    phases = ('scan', 'research_followup') if include_followups else ('scan',)
     snapshots, shadows = {}, {}
     conflicts, shadow_conflicts = set(), set()
     counts = Counter()
@@ -55,7 +60,7 @@ def load_events(db, since, now):
         counts[kind+'_events'] += 1
         try:
             item = json.loads(text)
-            if item['version'] != 1 or item['phase'] != 'scan':
+            if item['version'] != 1 or item['phase'] not in phases:
                 counts['excluded_version_or_preflight'] += 1
                 continue
             sid = item['snapshot_id']
@@ -83,6 +88,13 @@ def load_events(db, since, now):
             if abs(captured-event_at) > 5 or captured > now:
                 raise ValueError('Capture/event time mismatch')
             raw_quotes = {q['venue']: q for q in raw['quotes']}
+            if raw['phase'] == 'research_followup':
+                if len(raw['quotes']) != 1 or set(raw_quotes) != {'SIG'}:
+                    raise ValueError('Follow-up quote identity mismatch')
+                rows.append({'id': sid, 'exchange': raw['exchange'], 'at': captured,
+                             'SIG': quote(raw_quotes['SIG'], captured), 'aligned': False, 'followup': True})
+                counts['research_followup_scans'] += 1
+                continue
             if len(raw['quotes']) != 3 or set(raw_quotes) != set(VENUES):
                 raise ValueError('Quote identity mismatch')
             sig = quote(raw_quotes['SIG'], captured)
@@ -107,7 +119,7 @@ def load_events(db, since, now):
         except (KeyError, ValueError, TypeError, InvalidOperation):
             counts['invalid_SIG_or_snapshot'] += 1
     rows.sort(key=lambda r: (r['at'], r['id']))
-    counts['valid_SIG_scans'] = len(rows)
+    counts['valid_SIG_scans'] = len(rows) - counts['research_followup_scans']
     counts['aligned_three_venue_scans'] = sum(r['aligned'] for r in rows)
     return rows, dict(counts)
 
@@ -322,7 +334,7 @@ def report(path, now=None, hours=48):
         base['event_retention'] = retention_info(db)
         if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='events'").fetchone():
             return base
-        rows, counts = load_events(db, now-hours*3600, now)
+        rows, counts = load_events(db, now-hours*3600, now, include_followups=True)
         base.update(status='ok', events=counts, horizons=analyze(rows, now-hours*3600, now))
         return base
     finally:

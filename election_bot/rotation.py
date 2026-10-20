@@ -163,12 +163,16 @@ class RotationStudy:
                 (pid, now, best['source']['exchange'], best['target']['exchange'], json.dumps(best, default=str)))
         self.note('proposal', now)
 
-    def compare(self, source, src, target, dst, held, side, races):
+    def compare(self, source, src, target, dst, held, side, races, value_provider=None):
         c, p = self.config, self.policy; st = c['strategy']; fee = D(st['cost_buffer_per_share']); limits = c['limits']
         source_side = 'yes' if held > 0 else 'no'
         try:
-            sell, source_ref = reference(src['book'], src['refs'], source_side, st)
-            buy, target_ref = reference(dst['book'], dst['refs'], side, st)
+            if value_provider is None:
+                sell, source_ref = reference(src['book'], src['refs'], source_side, st)
+                buy, target_ref = reference(dst['book'], dst['refs'], side, st)
+            else:
+                sell, source_ref = value_provider(src, source_side, 'hold')
+                buy, target_ref = value_provider(dst, side, 'buy')
         except ValueError: return None
         bid, depth = sell.bids[0]; ask, ask_depth = buy.asks[0]
         if bid <= fee or target_ref-ask-2*fee < D(st['minimum_edge']): return None
@@ -213,6 +217,8 @@ def report(path, hours=24, now=None):
     if not 0 < hours <= 168: raise ValueError('Rotation lookback must be between 0 and 168 hours')
     result = dict(simulation_only=True, hours=hours, initialized=False, proposals=0, outcomes={}, recent=[], activity=[])
     path = Path(path)
+    from .model_rotation import report as model_report
+    result['independent_model'] = model_report(path, hours, now)
     if not path.exists(): return result
     db = sqlite3.connect(path.resolve().as_uri()+'?mode=ro', uri=True); db.row_factory = sqlite3.Row
     try:
@@ -253,4 +259,6 @@ def format_report(r):
     if r.get('initialized'): lines.append('Already fundable without sale: '+str(r.get('fundable_without_sale', 0)))
     if r['activity']: lines.append('Latest collection result: '+r['activity'][0]['reason'])
     lines.append('Means compare rotation with holding the same source shares; they are not realized profits or a portfolio backtest.')
+    from .model_rotation import format_report as format_model_report
+    if 'independent_model' in r:lines.append(format_model_report(r['independent_model']))
     return '\n'.join(lines)

@@ -130,7 +130,8 @@
     "max_sig_spread": ".04",
     "min_price": ".10",
     "max_price": ".90",
-    "max_collector_age_seconds": 7200
+    "max_collector_age_seconds": 7200,
+    "minimum_probability_haircut": "0"
   },
   "drawdown_control": {
     "enabled": false,
@@ -164,5 +165,31 @@
     "depth_fraction": ".25",
     "minimum_improvement_fraction": ".03",
     "cooldown_seconds": 1800
+  },
+  "patient_entry": {
+    "enabled": false,
+    "allocation": "500",
+    "improvement_ticks": 1,
+    "min_sig_spread": ".01",
+    "control_fraction": ".5",
+    "per_order": "25",
+    "max_shares": 50,
+    "wait_seconds": 5,
+    "pilot_fraction": ".1"
+  },
+  "entry_ranking": {
+    "enabled": false
+  },
+  "performance_throttle": {
+    "enabled": false
+  },
+  "research_followups": {
+    "enabled": false,
+    "max_books_per_cycle": 2,
+    "max_books_per_hour": 120,
+    "anchor_offsets_seconds": [300, 900],
+    "position_offsets_seconds": [60, 150, 300, 900],
+    "position_spacing_seconds": 60,
+    "backoff_seconds": 300
   }
 }

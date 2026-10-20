@@ -101,6 +101,18 @@ Regional exposure checks use the four [U.S. Census regions](https://www2.census.
 
 Run `python3 -m election_bot analysis` for entry-price and entry-gap tables at five and fifteen minutes. Add `--json` for coverage, sampling delays, race/day counts and exploratory uncertainty intervals; use `--paper` for the simulation journal. Old trades without an exact order-linked reference remain in the unknown-gap bucket. See [entry analysis](docs/entry-analysis.md) for definitions and limitations.
 
+### Patient entry pilot and entry ranking
+
+The optional patient route samples approximately 10% of eligible reference-entry attempts deterministically, splitting those between patient and control pricing. Both sampled arms are capped at 25 coins / 50 shares per order. Patient pricing improves the ask by one 0.005 tick when the spread allows it; its lifetime gross allowance is 500 coins. Unsampled entries retain normal sizing. These are configurable pilot limits, not increases to portfolio limits.
+
+An acknowledged patient order may rest for up to five seconds locally, bounded by its original SIG expiration. Monitoring checks signal validity and stops. The bot then cancels any remainder and confirms fills before continuing. Recovery cancels/reconciles immediately; it never renews patience, changes the original key or chases the ask. A slow network call can outlast the local wait; the original exchange expiration remains in force. No live order has been placed to validate the new waiting path during development.
+
+`python3 -m election_bot patient-study` (optionally `--json` or `--paper`) reports closed-attempt fill rates, pending reservations, improvement against each order’s own quoted ask, and bid movement relative to its own decision-time bid. It does not equate differences in absolute prices across markets with improvement or adverse selection. Missing observations and patient fallbacks are separate. These descriptive groups are not matched causal evidence.
+
+Optional `entry_ranking.enabled` defers buys until the current scan batch is complete and ranks still-fresh candidates by quantity times signal value minus ask and both buffers. Patient/control use the same ask for scoring. Exits run first; every selected candidate repeats normal preflight and reservation checks. Stale candidates are dropped. This is a partial batch ranking, not a whole-portfolio optimizer or calibrated expected profit. Slower scans may leave fewer fresh candidates.
+
+Both switches are off in the example configuration. After changing the local live configuration or code, restart the watcher once. See [pilot operation and rollback](docs/patient-entry.md).
+
 For a focused read-only report on stale feeds and unsold positions, run `python3 -m election_bot diagnostics` (or add `--paper`). No SIG key or network connection is needed to read this report. It uses newly recorded events; older generic skip messages cannot be reliably attributed to a venue.
 
 `quote_diagnostics_last_24h` identifies SIG, Kalshi and Polymarket separately, with local/source ages, stale or future timestamps, missing two-sided books, crossed books and excessive reference spreads. API request failures also carry a venue where known. SIG source age uses its engine capture time; Kalshi uses HTTP Date minus cache Age; Polymarket uses its book timestamp. Reference local age starts at each HTTP response receipt; SIG book local age starts at construction. Transport diagnostics separately retain request duration. A recently retrieved book with an old source timestamp could be unchanged or stale; this report does not distinguish those cases or relax the freshness limit. Non-finite timestamps are rejected explicitly. Failed checks are grouped by scan, preflight, pre-submit or performance-only observation, rather than mixed into one count.
@@ -295,3 +307,36 @@ Historical-lean research now covers all six reviewed Senate catalog states: NH, 
 ### Prospective threshold simulations and rejection reasons
 
 After one worker restart, independent polling research also collects **3¢/4¢/5¢ near-miss simulations** with 100 simulated coins per model/threshold/horizon, one-share entries, both cost buffers, depth limits, and persistent cash/positions. It logs polling, freshness, price, uncertainty, depth and cash rejection reasons. Run `python3 -m election_bot fair-value --hours 24` or add `--json` for per-race detail. Old observations are not converted into trades; live thresholds and budgets remain unchanged. See [near-miss assumptions and activation](docs/independent-fair-value.md#prospective-near-miss-portfolios-and-rejection-diagnostics-october-17).
+
+
+### Entry-gate counts and model-bound diagnostics
+
+After a worker restart, `scan_complete` includes per-gate counts split by scan, preflight and reservation phase, including summaries for early waits and halts. This distinguishes missing edges from drawdown, news, exposure and model-budget blocks; overlapping counts are not independent rejected orders. See [gate count semantics](docs/entry-gate-metrics.md). Drawdown status now shows the strict recovery target without changing its permanent peak. Live-model records also expose the actual probability haircut and support an optional absolute minimum, disabled by default; see [model tail handling](docs/model-live.md#tail-sensitivity-and-optional-execution-haircut).
+
+
+### Independent-model opportunity ranking and rotations
+
+After a watcher restart, the enabled rotation study also ranks fresh independent-model opportunities and compares keeping an owned position with funding another race. Three spaced confirmations precede a simulated sale; a later destination quote must pass refreshed model/capital/depth checks before a hypothetical purchase. Failed switches remain simulated cash. Run `python3 -m election_bot rotation-study --hours 24 --json` for `independent_model` rankings and paired outcomes. This remains research-only, with no live rotations or threshold/limit changes. See [model-rotation assumptions and activation](docs/capital-rotation.md#independent-model-ranking-and-sequential-rotation-trials).
+
+## Route performance control and expanded polling coverage
+
+`python3 -m election_bot performance-throttle` shows a prospective route sizing assessment (add `--json` or `--paper`). It defaults to report-only. If enabled, two sufficiently covered, underperforming UTC days reduce new-buy quantities on that route to half; exits stay available. It separates bid movement from spread and cost-buffer effects, persists its state, and rechecks sizing during reservation. See [policy and activation](docs/performance-throttle.md).
+
+The polling catalog now includes reviewed Massachusetts and Rhode Island Senate pairings. A healthy Senate ingestion no longer fails solely because an auxiliary Governor/House staging download failed. Bound races still need to pass the existing forecast-quality checks; this does not enlarge the live model pilot. See [coverage review and sources](docs/polling-coverage-2026-10-19.md).
+
+## Research follow-ups, entry timing and polling coverage
+
+These three additions are research-only. They do not change live sizing, entry thresholds, the drawdown buy pause or live model inputs. See [details and activation](docs/research-followups-entry-timing.md).
+
+- `research_followups` (disabled by default) requests a bounded number of extra SIG-only books after research anchors and simulated positions, so 5/15-minute study outcomes stop going missing. `python3 -m election_bot research-followups` shows coverage.
+- `python3 -m election_bot entry-timing-study` compares immediate entry with waiting for a fresh, sustained SIG bid improvement, splitting each outcome into price movement, half-spreads and buffers.
+- `python3 -m election_bot polling-coverage` explains, for each Senate contract, its binding, accepted polls and why an estimate is or is not produced. New Arkansas, Minnesota, New Mexico and South Carolina bindings plus newly reviewed pollster families are research-tier only. The live model ignores them.
+
+
+## Settlement-value drawdown and exits
+
+The competition scores balances after settlement, and the platform charges no fees. `python3 -m election_bot settlement-review` replays holdings, past sales and the drawdown pause at SIG bid versus Kalshi/Polymarket fair value. `drawdown_control.valuation: "reference_fair"` makes the buy pause track expected settlement value without the 1¢ buffer. `settlement_exits` blocks sales below reference fair value. Both are off by default; see [settlement value](docs/settlement-value.md) for evidence and activation.
+
+## Election-night mode
+
+`election_night` (off by default) buys races both Kalshi and Polymarket bid at 0.95+ when SIG still lags by at least 2¢. It runs only from Nov 3 6pm ET to the Nov 4 noon close, and for this route only it overrides generic news pauses (never disputed results). Rehearse with `python3 -m election_bot election-night-rehearsal`. See [election-night mode](docs/election-night.md) for the rule, overrides, pre-election checklist and activation.

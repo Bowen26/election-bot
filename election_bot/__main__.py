@@ -106,6 +106,32 @@ def main():
     leadership.add_argument('--paper', action='store_true')
     leadership.add_argument('--json', action='store_true')
     leadership.add_argument('--hours', type=float, default=48, help='Lookback in hours, up to 720 (default: 48)')
+    timing = sub.add_parser('entry-timing-study', help='Simulate immediate vs confirmed-bid entry timing; no orders or network')
+    timing.add_argument('--paper', action='store_true')
+    timing.add_argument('--json', action='store_true')
+    timing.add_argument('--hours', type=float, default=48, help='Lookback in hours, up to 720 (default: 48)')
+    timing.add_argument('--include-retrospective', action='store_true',
+                        help='Also replay proposals recorded before the rule was pre-registered (exploratory)')
+    followups = sub.add_parser('research-followups', help='Read research follow-up quote coverage; no network')
+    followups.add_argument('--paper', action='store_true')
+    followups.add_argument('--json', action='store_true')
+    followups.add_argument('--hours', type=float, default=48)
+    review = sub.add_parser('settlement-review', help='Replay holdings, sales and drawdown at settlement value; no network')
+    review.add_argument('--paper', action='store_true')
+    review.add_argument('--json', action='store_true')
+    review.add_argument('--hours', type=float, default=72)
+    night = sub.add_parser('election-night-rehearsal', help='Show what the election-night route would buy on recorded quotes; no orders')
+    night.add_argument('--paper', action='store_true')
+    night.add_argument('--json', action='store_true')
+    night.add_argument('--hours', type=float, default=24)
+    coverage_polls = sub.add_parser('polling-coverage', help='Explain polling bindings and inputs per Senate contract; no network')
+    coverage_polls.add_argument('--json', action='store_true')
+    throttle = sub.add_parser('performance-throttle', help='Read route sizing evidence and state; no orders or network')
+    throttle.add_argument('--paper', action='store_true')
+    throttle.add_argument('--json', action='store_true')
+    patient = sub.add_parser('patient-study', help='Compare the patient entry pilot against the current entry method; no orders or network')
+    patient.add_argument('--paper', action='store_true')
+    patient.add_argument('--json', action='store_true')
     exits = sub.add_parser('exit-study', help='Read prospective exit-depth comparisons; no network')
     exits.add_argument('--paper', action='store_true')
     exits.add_argument('--json', action='store_true')
@@ -148,6 +174,12 @@ def main():
         from .drawdown import report
         config = json.loads(args.config.read_text())
         output(report(RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3'), config))
+        return
+    if args.command == 'performance-throttle':
+        from .performance_throttle import report, format_report
+        config = json.loads(args.config.read_text()) if args.config.exists() else {}
+        result = report(RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3'),config)
+        output(result) if args.json else print(format_report(result))
         return
     if args.command == 'strategy-performance':
         from .strategy_performance import report, format_report
@@ -195,6 +227,32 @@ def main():
         result = report(config, RUNTIME, args.race)
         output(result) if args.json else print(format_report(result))
         return
+    if args.command in ('entry-timing-study', 'research-followups'):
+        path = RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3')
+        if args.command == 'entry-timing-study':
+            from .entry_timing import report, format_report
+            result = report(path, hours=args.hours, include_retrospective=args.include_retrospective)
+        else:
+            from .research_followups import report, format_report
+            result = report(path, hours=args.hours)
+        output(result) if args.json else print(format_report(result))
+        return
+    if args.command == 'election-night-rehearsal':
+        from .election_night import rehearse, format_rehearsal
+        result = rehearse(RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3'),
+                          json.loads(args.config.read_text()), hours=args.hours)
+        output(result) if args.json else print(format_rehearsal(result))
+        return
+    if args.command == 'settlement-review':
+        from .settlement_review import report, format_report
+        result = report(RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3'), hours=args.hours)
+        output(result) if args.json else print(format_report(result))
+        return
+    if args.command == 'polling-coverage':
+        from .poll_coverage import report, format_report
+        result = report(RUNTIME, json.loads(args.config.read_text()))
+        output(result) if args.json else print(format_report(result))
+        return
     if args.command in ('leadership', 'exit-study', 'low-price-study'):
         if args.command == 'low-price-study':
             from .low_price import report, format_report
@@ -210,6 +268,11 @@ def main():
             print(format_report(result))
         return
     RUNTIME.mkdir(exist_ok=True, mode=0o700)
+    if args.command == 'patient-study':
+        from .patient_report import report, format_report
+        result = report(RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3'))
+        output(result) if args.json else print(format_report(result))
+        return
     if args.command == 'analysis':
         from .entry_analysis import report, format_report
         result = report(RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3'))
