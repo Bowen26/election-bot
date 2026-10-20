@@ -340,3 +340,7 @@ The competition scores balances after settlement, and the platform charges no fe
 ## Election-night mode
 
 `election_night` (off by default) buys races both Kalshi and Polymarket bid at 0.95+ when SIG still lags by at least 2¢. It runs only from Nov 3 6pm ET to the Nov 4 noon close, and for this route only it overrides generic news pauses (never disputed results). Rehearse with `python3 -m election_bot election-night-rehearsal`. See [election-night mode](docs/election-night.md) for the rule, overrides, pre-election checklist and activation.
+
+## Swing stress test and party-pair scan
+
+`python3 -m election_bot swing-risk` stress-tests holdings against a uniform national swing at reference fair value. `python3 -m election_bot pair-arbitrage` scans SIG's per-party markets for baskets priced away from 1 (paced reads, no orders). See [risk and arbitrage reports](docs/risk-and-arbitrage-reports.md).

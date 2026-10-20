@@ -124,6 +124,15 @@ def main():
     night.add_argument('--paper', action='store_true')
     night.add_argument('--json', action='store_true')
     night.add_argument('--hours', type=float, default=24)
+    swing = sub.add_parser('swing-risk', help='Stress holdings against a uniform national swing; no network')
+    swing.add_argument('--paper', action='store_true')
+    swing.add_argument('--json', action='store_true')
+    pairs = sub.add_parser('pair-arbitrage', help='Scan SIG party-pair markets for mispricing; paced reads, no orders')
+    pairs.add_argument('--json', action='store_true')
+    pairs.add_argument('--interval', type=float, default=2.5,
+                       help='Seconds between SIG reads (default 2.5, safe beside the live bot; minimum 0.8)')
+    pairs.add_argument('--limit', type=int, help='Scan only the first N races (alphabetical)')
+    pairs.add_argument('--threshold', default='0.01', help='Minimum edge per set to list (default 0.01)')
     coverage_polls = sub.add_parser('polling-coverage', help='Explain polling bindings and inputs per Senate contract; no network')
     coverage_polls.add_argument('--json', action='store_true')
     throttle = sub.add_parser('performance-throttle', help='Read route sizing evidence and state; no orders or network')
@@ -235,6 +244,20 @@ def main():
         else:
             from .research_followups import report, format_report
             result = report(path, hours=args.hours)
+        output(result) if args.json else print(format_report(result))
+        return
+    if args.command == 'swing-risk':
+        from .swing_risk import report, format_report
+        result = report(RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3'),
+                        json.loads(args.config.read_text()))
+        output(result) if args.json else print(format_report(result))
+        return
+    if args.command == 'pair-arbitrage':
+        from .pair_arbitrage import scan, report, format_report
+        if args.interval < 0.8:
+            parser.error('--interval must be at least 0.8 seconds')
+        config = json.loads(args.config.read_text())
+        result = report(scan(Sig(key(), config['tournament_slug']), args.interval, args.limit), args.threshold)
         output(result) if args.json else print(format_report(result))
         return
     if args.command == 'election-night-rehearsal':
