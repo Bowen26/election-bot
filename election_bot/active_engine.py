@@ -80,6 +80,11 @@ class ActiveEngine(Engine):
         self.election_night = ElectionNight(self.config)
         from .election_night import Radar
         self.radar = Radar(self.election_night)
+        from . import pair_baskets
+        pair_baskets.initialize(self.journal.db)
+        self.pair_policy = pair_baskets.settings(self.config)
+        self.pair_list = pair_baskets.pairs(self.config)
+        self.pair_cursor, self.pair_verified = 0, {}
         self.scan_policy = 'priority_v1' if self.execution.get('priority_scanning', True) else 'news_round_robin'
         self.scanner.set_policy(self.scan_policy)
 
@@ -240,6 +245,153 @@ class ActiveEngine(Engine):
                 return reason
         return None
 
+    def submit_basket_leg(self, mapping, role, price, quantity, account, positions):
+        """One NO buy through the normal reservation/placement/reconciliation path. Returns shares filled."""
+        from .pair_baskets import REASON
+        exchange = mapping['sig_exchange_id']
+        payload = {'exchangeId': exchange, 'side': 'no', 'action': 'buy', 'quantity': int(quantity),
+            'price': float(price), 'tournamentId': self.sig.tid, 'idempotencyKey': str(uuid.uuid4()),
+            'expirationDate': datetime.fromtimestamp(time.time()+self.config['order_lifetime_seconds'],
+                                                     timezone.utc).isoformat()}
+        fee = D(self.config['strategy']['cost_buffer_per_share'])
+        reserve = int(quantity) * (D(price) + fee)
+        self.reserve_order(payload, reserve, account, positions, exit_reason=REASON,
+                           basket_context=(self.races.race(exchange), role))
+        if self.stopped():
+            self.ledger.record(payload, 0, 0, fee)
+            return 0
+        self.report('signal', {'exchange': exchange, 'order_key': payload['idempotencyKey'], 'side': 'no',
+                               'price': str(price), 'quantity': int(quantity), 'action': 'buy',
+                               'reason': REASON, 'basket_role': role})
+        if self.live:
+            try:
+                response = self.sig.place(payload)
+            except SubmissionClockUnavailable:
+                self.ledger.record(payload, 0, 0, fee)
+                raise
+            self.journal.response(payload['idempotencyKey'], response)
+            self.finish(payload['idempotencyKey'], payload, response, reserve)
+        else:
+            self.ledger.record(payload, int(quantity), D(price), fee)
+            self.report('paper_fill', {'exchange': exchange, 'side': 'no', 'price': str(price),
+                                       'filled': int(quantity), 'simulation': True, 'reason': REASON})
+        row = self.journal.db.execute('SELECT quantity FROM executions WHERE key=?',
+                                      (payload['idempotencyKey'],)).fetchone()
+        return int(D(row[0])) if row else 0
+
+    def mark_holding(self, mapping):
+        """Fresh drawdown mark for one contract (with references in fair-value mode)."""
+        if not self.drawdown.policy['enabled']:
+            return
+        refs = self.references.books(mapping, self.metadata(mapping)) if self.drawdown.fair else None
+        self.drawdown.observe(mapping['sig_exchange_id'], self.sig.book(mapping['sig_exchange_id']), refs)
+
+    def pair_basket_cycle(self, account, positions):
+        """Check a few pairs per cycle; buy NO on both parties when the bids sum above 1 + min_edge."""
+        from . import pair_baskets as pb
+        policy = self.pair_policy
+        if not policy['enabled'] or not self.pair_list:
+            return
+        candidates = [p for p in self.pair_list if policy['races'] is None or p[0]['race_key'] in policy['races']]
+        if not candidates:
+            return
+        start = self.pair_cursor % len(candidates)
+        batch = (candidates[start:]+candidates[:start])[:policy['pairs_per_cycle']]
+        self.pair_cursor = start+len(batch)
+        for anchor, leg in batch:
+            if self.stopped():
+                return
+            race = anchor['race_key']
+            detail = {'race': race}
+            try:
+                block = self.news_block(anchor)
+                if block and not block.startswith('News uncertainty pause'):
+                    detail['skip'] = 'news_or_dispute'
+                    continue
+                for mapping in (anchor, leg):
+                    held, _ = self.held(mapping['sig_exchange_id'], positions)
+                    if held > 0:
+                        raise ValueError('holds YES on a basket contract')
+                now = time.time()
+                if now-self.pair_verified.get(race, 0) > policy['verify_seconds']:
+                    self.metadata(anchor, force=True)   # Existing full pin for the anchor.
+                    pb.verify_pair(self.sig.market(anchor['sig_market_id']),
+                                   self.sig.market(leg['sig_market_id']), anchor, leg)
+                    self.pair_verified[race] = now
+                books = {'anchor': self.sig.book(anchor['sig_exchange_id']), 'leg': self.sig.book(leg['sig_exchange_id'])}
+                for book in books.values():
+                    book.check(self.config['strategy']['max_age_seconds'], venue='SIG')
+                legs = {'anchor': anchor, 'leg': leg}
+                repair = pb.unmatched(self.journal.db, anchor, leg)
+                if repair:
+                    role, quantity, cap = repair
+                    bids = books[role].bids
+                    price = 1-bids[0][0] if bids else None
+                    detail.update(repair_role=role, repair_quantity=quantity, break_even=str(cap))
+                    if price is not None and price <= cap:
+                        size = int(min(quantity, bids[0][1]*policy['depth_fraction']))
+                        if size >= 1:
+                            detail['repaired'] = self.submit_basket_leg(legs[role], role, price, size, account, positions)
+                            if detail['repaired']:
+                                self.mark_holding(legs[role])
+                    continue
+                fee = D(self.config['strategy']['cost_buffer_per_share'])
+                # Both legs share the race budget; size so the pair fits within coin limits.
+                coins = min(policy['total_coins']-pb.basket_cost(self.journal.db),
+                            min(self.available(anchor['sig_exchange_id'], account),
+                                self.available(leg['sig_exchange_id'], account)))
+                plan, reason = pb.plan(books['anchor'], books['leg'], policy, coins, fee)
+                if plan is None:
+                    detail['skip'] = reason
+                    continue
+                detail.update(edge=str(plan['edge']), sets=plan['sets'], order=plan['order'])
+                first, second = plan['order']
+                filled = self.submit_basket_leg(legs[first], first, plan['prices'][first], plan['sets'], account, positions)
+                detail['first_filled'] = filled
+                if filled < 1:
+                    continue
+                # The new holding needs a drawdown mark, or the second leg is paused as incomplete.
+                self.mark_holding(legs[first])
+                account = self.sig.account()
+                self.check_account(account)
+                positions = self.sig.positions()
+                fresh = self.sig.book(legs[second]['sig_exchange_id'])
+                price = pb.second_leg_price(plan['prices'][first], 1-fresh.bids[0][0]) if fresh.bids else None
+                if price is None:
+                    detail['second'] = 'above_break_even; repair later'
+                    continue
+                size = int(min(filled, fresh.bids[0][1]*policy['depth_fraction']))
+                detail['second_filled'] = self.submit_basket_leg(legs[second], second, price, size, account, positions) if size >= 1 else 0
+            except ReservationRejected as error:
+                detail['skip'] = 'reservation: '+str(error)
+                self.gate_block(error.gate, 'pair_basket', anchor['sig_exchange_id'])
+            except APIError as error:
+                if error.status in (401, 403, 429):
+                    raise
+                detail['skip'] = 'api: '+str(error)[:120]
+            except (ValueError, KeyError, BookValidationError) as error:
+                detail['skip'] = str(error)[:160]
+            finally:
+                self.report('pair_basket', detail)
+
+    def cap_basket_sale(self, signal, exchange, held, detail):
+        """Shares bought for a pair basket are held to settlement; sell only the rest."""
+        if signal is None or signal.action != 'sell':
+            return signal
+        from .pair_baskets import locked
+        reserved = locked(self.journal.db, exchange)
+        if not reserved:
+            return signal
+        free = int(abs(D(held))-reserved)
+        if free < 1:
+            detail.update(status='blocked', reason='basket_shares_held_to_settlement', basket_shares=str(reserved))
+            return None
+        if signal.quantity > free:
+            from dataclasses import replace
+            detail['basket_capped_quantity'] = free
+            return replace(signal, quantity=free)
+        return signal
+
     def news_gate(self, mapping, signal):
         """News block for this signal; election-night buys may pass a generic uncertainty pause."""
         from .election_night import REASON, RECYCLE
@@ -288,10 +440,14 @@ class ActiveEngine(Engine):
     def gate_block(self, gate, phase, exchange=None):
         self.gate_metrics.blocked(gate, phase, exchange)
 
-    def reserve_order(self, payload, reserve, account, positions, exit_reason=None, exit_epoch=None, model_context=None, entry_context=None, risk_context=None, patient_context=None, throttle_context=None):
+    def reserve_order(self, payload, reserve, account, positions, exit_reason=None, exit_epoch=None, model_context=None, entry_context=None, risk_context=None, patient_context=None, throttle_context=None, basket_context=None):
         """Recheck local limits under the same write lock as the reservation."""
         drawdown_rejected = False
         position_rejected = None
+        from .pair_baskets import REASON as PAIR
+        basket = exit_reason == PAIR
+        if basket and (basket_context is None or payload['action'] != 'buy' or payload['side'] != 'no'):
+            raise ReservationRejected('Basket legs are NO buys with basket context', gate='pair_basket')
         def guard():
             nonlocal drawdown_rejected, position_rejected
             self.ledger.inventory(refresh=True)  # Include any newly committed execution.
@@ -299,7 +455,8 @@ class ActiveEngine(Engine):
             if self.ledger.missing():
                 raise RuntimeError('Unimported executions block reservation')
             exchange = payload['exchangeId']
-            if time.time()-self.races.last_order(self.journal, exchange) < self.config['cooldown_seconds']:
+            # Both legs of a basket are in one race; the second must not wait out the race cooldown.
+            if not basket and time.time()-self.races.last_order(self.journal, exchange) < self.config['cooldown_seconds']:
                 raise ReservationRejected('Race cooldown changed before reservation', gate='race_cooldown')
             expected = D(payload['quantity']) * (D(payload['price']) + D(self.config['strategy']['cost_buffer_per_share']))
             if D(reserve) != expected:
@@ -309,7 +466,11 @@ class ActiveEngine(Engine):
                 if not drawdown['buy_allowed']:
                     drawdown_rejected = True
                     raise ReservationRejected('New buys paused: '+drawdown['reason'], gate='portfolio_drawdown')
-                if self.position_guard.policy['enabled']:
+                if basket:
+                    held, _ = self.held(exchange, positions)
+                    if held > 0:
+                        raise ReservationRejected('Basket NO leg would oppose held YES', gate='pair_basket')
+                elif self.position_guard.policy['enabled']:
                     held, _ = self.held(exchange, positions)
                     if held:
                         if entry_context is None or entry_context[0]['sig_exchange_id'] != exchange:
@@ -327,10 +488,17 @@ class ActiveEngine(Engine):
                 from .election_night import REASON as NIGHT
                 night_exempt = (exit_reason == NIGHT and self.election_night.active()
                                 and self.election_night.policy['ignore_reentry_cooldown'])
-                if self.reentry_wait(exchange) and not night_exempt:
+                if self.reentry_wait(exchange) and not (night_exempt or basket):
                     raise ReservationRejected('Race is in post-sale reentry cooldown', gate='reentry_cooldown')
                 if reserve > self.available(exchange, account):
                     raise ReservationRejected('Coin limits changed before reservation', gate='coin_limits')
+                if basket:
+                    race, role = basket_context
+                    if race != self.races.race(exchange):
+                        raise ReservationRejected('Basket race changed before reservation', gate='pair_basket')
+                    # Tag in the reservation transaction: these shares are never sold by other routes.
+                    self.journal.db.execute('INSERT INTO basket_orders VALUES (?,?,?,?)',
+                                            (payload['idempotencyKey'], race, exchange, role))
             if payload['action'] == 'sell':
                 basis = self.ledger.sale_basis(exchange, payload['side'], payload['quantity'])
                 if exit_reason == 'trend_profit_target':
@@ -411,7 +579,7 @@ class ActiveEngine(Engine):
                 from . import patient_entry
                 patient_entry.attach_control(self.journal.db, payload, self.config,
                                              self.latest_entry_context)
-            if payload['action']=='buy':
+            if payload['action']=='buy' and not basket:  # Riskless baskets are not a priced route.
                 from .performance_throttle import enabled as throttle_enabled
                 if throttle_context is None:
                     if throttle_enabled(self.config):
@@ -574,6 +742,7 @@ class ActiveEngine(Engine):
                                   trend_check=trend_check) if self.execution['sell_enabled'] else None
         # Optional: sell only above reference settlement value (the competition scores settlement).
         exit_signal = gate_exit(exit_signal, refs, self.config['strategy'], self.settlement_exits, exit_check)
+        exit_signal = self.cap_basket_sale(exit_signal, exchange, held, exit_check)
         if entry and held and ((held < 0) != (entry.side == 'no')):
             entry = None  # Never use a complement buy to close or flip inventory.
             self.gate_block('opposite_inventory', phase, exchange)
@@ -613,6 +782,7 @@ class ActiveEngine(Engine):
                 recycled = {}
                 signal = recycle(self.election_night, book, refs, held, exchange,
                                  self.config['limits']['per_order'], recycled)
+                signal = self.cap_basket_sale(signal, exchange, held, recycled)
                 night['recycle'] = recycled
             # Stay on the priority lane only while SIG still lags a called race.
             if night.get('status') == 'eligible' or night.get('reason') == 'size_below_one_share':
@@ -807,7 +977,9 @@ class ActiveEngine(Engine):
                 refs = None
                 if self.drawdown.fair:
                     # Settlement-value marks need both reference books, not just SIG.
-                    mapping = next((m for m in self.markets if m['sig_exchange_id'] == exchange), None)
+                    # Basket legs are disabled mappings but still carry pinned reference identities.
+                    mapping = next((m for m in self.config['markets'] if m.get('sig_exchange_id') == exchange
+                                    and (m.get('enabled') or m.get('basket_leg'))), None)
                     if mapping is None:
                         raise ValueError('Held contract has no enabled mapping for fair-value marks')
                     refs = self.references.books(mapping, self.metadata(mapping))
@@ -845,6 +1017,7 @@ class ActiveEngine(Engine):
         exposure = Exposure(self.ledger, self.config)
         cap = exposure.headroom(mapping['sig_exchange_id'], 'sell', 'yes' if held > 0 else 'no') if exposure.enabled else None
         signal, detail = self.risk_exit.propose(mapping, book, held, cost, cap, phase=phase)
+        signal = self.cap_basket_sale(signal, mapping['sig_exchange_id'], held, detail)
         self.record_quote_snapshot(mapping, book, [], 'risk_'+phase)
         self.report('risk_exit_check', {**detail, 'phase': phase, 'snapshot_id': self.latest_snapshot_id})
         if signal and force:
@@ -931,6 +1104,13 @@ class ActiveEngine(Engine):
                 self.exit_blocked(exchange, 'open_orders', 'scan')
             return True
         positions = self.sig.positions()
+        if self.pair_policy['enabled'] and self.pair_list:
+            self.pair_basket_cycle(account, positions)
+            if self.stopped():
+                return False
+            account = self.sig.account()
+            self.check_account(account)
+            positions = self.sig.positions()
         for name, events in (self.news.drain() if self.news else {}).items():
             self.pending_news[name] = (self.pending_news.get(name, []) + events)[-100:]
         orders, checked = 0, 0

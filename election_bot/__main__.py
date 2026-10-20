@@ -133,6 +133,12 @@ def main():
                        help='Seconds between SIG reads (default 2.5, safe beside the live bot; minimum 0.8)')
     pairs.add_argument('--limit', type=int, help='Scan only the first N races (alphabetical)')
     pairs.add_argument('--threshold', default='0.01', help='Minimum edge per set to list (default 0.01)')
+    legs = sub.add_parser('pair-legs', help='Discover verified Republican basket legs (GET-only); --write adds them disabled to config')
+    legs.add_argument('--write', action='store_true', help='Back up config.json and append the discovered legs (disabled)')
+    legs.add_argument('--race', action='append', help='Limit to a race_key, e.g. 2026:house:FL-22 (repeatable)')
+    legs.add_argument('--limit', type=int)
+    legs.add_argument('--interval', type=float, default=2.5)
+    legs.add_argument('--json', action='store_true')
     coverage_polls = sub.add_parser('polling-coverage', help='Explain polling bindings and inputs per Senate contract; no network')
     coverage_polls.add_argument('--json', action='store_true')
     throttle = sub.add_parser('performance-throttle', help='Read route sizing evidence and state; no orders or network')
@@ -251,6 +257,35 @@ def main():
         result = report(RUNTIME / ('paper.sqlite3' if args.paper else 'live.sqlite3'),
                         json.loads(args.config.read_text()))
         output(result) if args.json else print(format_report(result))
+        return
+    if args.command == 'pair-legs':
+        from .pair_baskets import discover
+        if args.interval < 0.8:
+            parser.error('--interval must be at least 0.8 seconds')
+        config = json.loads(args.config.read_text())
+        with References() as refs:
+            found, skipped = discover(config, Sig(key(), config['tournament_slug']), refs,
+                                      races=set(args.race) if args.race else None, limit=args.limit, interval=args.interval)
+        result = {'discovered': [{'race_key': l['race_key'], 'name': l['name'], 'sig_exchange_id': l['sig_exchange_id'],
+                                  'kalshi_ticker': l['kalshi_ticker'], 'polymarket_market': l['polymarket_market']} for l in found],
+                  'skipped': skipped, 'written': False}
+        if args.write and found:
+            backup = RUNTIME / ('config-before-pair-legs-%d.json' % int(time.time()))
+            backup.write_text(args.config.read_text())
+            os.chmod(backup, 0o600)
+            config['markets'].extend(found)
+            validate_config(config)
+            save_json(args.config, config)
+            result.update(written=True, backup=str(backup))
+        if args.json:
+            output(result)
+        else:
+            print('Discovered %d verified legs; skipped %d races.%s' % (len(found), len(skipped),
+                  ' Written to config (disabled); backup ' + result['backup'] if result['written'] else ' Preview only; rerun with --write.'))
+            for leg in result['discovered']:
+                print('  ' + leg['race_key'] + '  ' + leg['name'])
+            for race, reason in sorted(skipped.items()):
+                print('  skip ' + race + ': ' + reason)
         return
     if args.command == 'pair-arbitrage':
         from .pair_arbitrage import scan, report, format_report

@@ -33,6 +33,8 @@ def validate_config(config):
     election_night_settings(config)
     from .alerts import settings as alert_settings
     alert_settings(config)
+    from .pair_baskets import settings as pair_settings
+    pair_settings(config)
     execution = config.get('execution', {})
     if execution.get('enabled'):
         if type(execution.get('priority_scanning', True)) is not bool:
