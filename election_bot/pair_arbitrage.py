@@ -70,9 +70,12 @@ def scan(sig, interval=2.5, limit=None, sleep=time.sleep, clock=time.monotonic):
                 books[party] = sig.book(exchange)
                 read_at.append(time.time())
             except APIError as exc:
-                # A rate limit or outage ends the scan; partial results are still reported.
-                results.append({'race': race, 'status': 'api_error_scan_stopped', 'reason': str(exc)[:120]})
-                return results
+                if exc.status in (401, 403, 429):
+                    # Rate limits and auth failures end the scan; partial results are still reported.
+                    results.append({'race': race, 'status': 'api_error_scan_stopped', 'reason': str(exc)[:120]})
+                    return results
+                error = str(exc)[:120]  # Transient network or server error: skip this race only.
+                break
             except (ValueError, KeyError) as exc:
                 error = str(exc)[:120]
                 break

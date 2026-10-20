@@ -63,6 +63,19 @@ class PairTests(unittest.TestCase):
         self.assertIn('PARTY-PAIR', pair_format(out))
 
 
+    def test_transient_error_skips_race_and_continues(self):
+        sig = Mock()
+        sig.markets.return_value = [market('1', 'Will the Democratic Party win the Iowa Senate?', '11'),
+                                    market('2', 'Will the Republican Party win the Iowa Senate?', '12'),
+                                    market('3', 'Will the Democratic Party win the Ohio Senate?', '13'),
+                                    market('4', 'Will the Republican Party win the Ohio Senate?', '14')]
+        sig.book.side_effect = [APIError('GET failed (URLError)', method='GET'),
+                                book('.55', '.57'), book('.48', '.50')]
+        results = scan(sig, interval=0, sleep=lambda s: None, clock=lambda: 0.0)
+        self.assertEqual([(r['race'], r['status']) for r in results],
+                         [('Iowa Senate', 'read_error'), ('Ohio Senate', 'ok')])
+
+
 class SwingTests(unittest.TestCase):
     def test_probability_orientation_and_shift(self):
         self.assertEqual(dem_probability(D('.9'), 1), D('.9'))
