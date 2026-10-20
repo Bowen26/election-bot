@@ -169,7 +169,7 @@ def basket_cost(db):
     return sum((cost for _, cost in attributed(db).values()), D(0))
 
 
-def discover(config, sig, refs, races=None, limit=None, interval=2.5, sleep=time.sleep, clock=time.monotonic):
+def discover(config, sig, refs, races=None, limit=None, interval=3.0, sleep=time.sleep, clock=time.monotonic):
     """GET-only: build disabled basket_leg mappings for two-party races. Nothing is enabled or traded.
 
     The Republican contract must pass the same strict SIG/Kalshi/Polymarket identity
@@ -205,8 +205,9 @@ def discover(config, sig, refs, races=None, limit=None, interval=2.5, sleep=time
             continue
         anchor, listing = anchors[race], parties['Republican Party']
         try:
+            # sig.market makes two SIG reads (market and rules); pace both.
             if last is not None:
-                sleep(max(0, last+interval-clock()))
+                sleep(max(0, last+2*interval-clock()))
             last = clock()
             sm = sig.market(listing['id'])
             yes = [x for x in sm['exchanges'] if x['option'].upper() == 'YES']

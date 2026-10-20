@@ -137,7 +137,7 @@ def main():
     legs.add_argument('--write', action='store_true', help='Back up config.json and append the discovered legs (disabled)')
     legs.add_argument('--race', action='append', help='Limit to a race_key, e.g. 2026:house:FL-22 (repeatable)')
     legs.add_argument('--limit', type=int)
-    legs.add_argument('--interval', type=float, default=2.5)
+    legs.add_argument('--interval', type=float, default=3.0, help='Seconds per SIG read (default 3.0, about 20 reads/min beside the live bot)')
     legs.add_argument('--json', action='store_true')
     coverage_polls = sub.add_parser('polling-coverage', help='Explain polling bindings and inputs per Senate contract; no network')
     coverage_polls.add_argument('--json', action='store_true')
