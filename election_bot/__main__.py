@@ -14,7 +14,15 @@ from .state import Journal, exclusive_lock
 from .news import NewsCollector, NewsGate, NewsStore
 
 ROOT = Path(__file__).resolve().parent.parent
-RUNTIME = ROOT / '.runtime'
+
+
+def runtime_dir(root):
+    """Prefer .runtime.nosync: iCloud Drive skips *.nosync, so it cannot evict live journals."""
+    nosync = root / '.runtime.nosync'
+    return nosync if nosync.is_dir() else root / '.runtime'
+
+
+RUNTIME = runtime_dir(ROOT)
 
 
 def output(value):
@@ -454,7 +462,11 @@ def main():
             return
         token = key()
         if args.command == 'run' and not args.once:
+            from . import runner
             from .runner import connect
+            # From here the main loop beats, including startup connection waits, for the watcher.
+            runner.HEARTBEAT = RUNTIME / 'supervisor' / 'heartbeat'
+            runner.beat(force=True)
             sig = connect(lambda: Sig(token, config['tournament_slug']),
                           lambda: (RUNTIME / 'STOP').exists(), output)
             if sig is None:

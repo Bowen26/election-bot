@@ -1,4 +1,6 @@
 """Pause continuous execution on transient read failures, without replaying writes."""
+import os
+import threading
 import time
 
 from .clients import APIError
@@ -11,6 +13,27 @@ def transient_read(error):
             and error.status in (None, 408, 429, 500, 502, 503, 504))
 
 
+HEARTBEAT = None  # Set by the CLI; the watcher restarts a worker whose main loop stops beating.
+BEAT_SECONDS = 15
+_last_beat = None
+
+
+def beat(force=False):
+    """Touch the heartbeat from the main thread only, so live helper threads cannot mask a hang."""
+    global _last_beat
+    if HEARTBEAT is None or threading.current_thread() is not threading.main_thread():
+        return
+    now = time.monotonic()
+    if not force and _last_beat is not None and now-_last_beat < BEAT_SECONDS:
+        return
+    _last_beat = now
+    try:
+        with open(HEARTBEAT, 'a'):
+            os.utime(HEARTBEAT)
+    except OSError:
+        pass
+
+
 def wait(engine, seconds, news=None):
     return wait_until(engine.stopped, seconds, news)
 
@@ -18,6 +41,7 @@ def wait(engine, seconds, news=None):
 def wait_until(stopped, seconds, news=None):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
+        beat()
         if stopped():
             return False
         if news and news.wake.is_set():
@@ -57,6 +81,7 @@ def run_loop(engine, once=False, news=None):
     failures = 0
     clock_failures = 0
     while not engine.stopped():
+        beat(force=True)
         try:
             running = engine.cycle()
         except ClockSampleUnavailable as error:

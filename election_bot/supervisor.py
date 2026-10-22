@@ -48,7 +48,9 @@ def restartable(code):
 
 # Auto-recovery: halts that a reconciliation plus restart is known to resolve. Anything
 # else (accounting inconsistencies, contract changes, loss stop, auth, config) still halts.
-AUTO_DEFAULTS = dict(enabled=False, max_per_hour=6)
+# stall_seconds: kill and reconcile a worker whose main loop stops beating (0 disables).
+AUTO_DEFAULTS = dict(enabled=False, max_per_hour=6, stall_seconds=600)
+STALL_CHECK_SECONDS = 5
 SAFE_HALT_TYPES = {'APIError', 'JSONDecodeError', 'TimeoutError', 'ConnectionError', 'ConnectionResetError',
                    'ConnectionRefusedError', 'BrokenPipeError', 'URLError', 'RemoteDisconnected',
                    'IncompleteRead', 'SSLError', 'ClockSampleUnavailable', 'RecoveryHistoryUnavailable'}
@@ -65,7 +67,22 @@ def auto_settings(config):
         raise ValueError('auto_recovery enabled must be boolean')
     if type(p['max_per_hour']) is not int or not 1 <= p['max_per_hour'] <= 20:
         raise ValueError('auto_recovery max_per_hour must be an integer from 1 to 20')
+    if type(p['stall_seconds']) is not int or not (p['stall_seconds'] == 0 or 120 <= p['stall_seconds'] <= 7200):
+        raise ValueError('auto_recovery stall_seconds must be 0 or an integer from 120 to 7200')
     return p
+
+
+def heartbeat_path(runtime):
+    return Path(runtime)/'supervisor'/'heartbeat'
+
+
+def heartbeat_age(runtime, since, now):
+    """Seconds since the worker's main loop last beat, counting from its start."""
+    try:
+        last = os.stat(heartbeat_path(runtime)).st_mtime
+    except OSError:
+        last = since
+    return now-max(since, last)
 
 
 def record_halt(runtime, error, code):
@@ -166,6 +183,7 @@ def watch(root, runtime, config, live=False, report=print):
     except (OSError, ValueError, TypeError):
         auto = dict(AUTO_DEFAULTS)
     recoveries = deque()
+    stall_limit = auto['stall_seconds'] if auto['enabled'] else 0
 
     def state(status, **extra):
         payload = {'event': 'supervisor', 'status': status, 'at': time.time(),
@@ -182,6 +200,31 @@ def watch(root, runtime, config, live=False, report=print):
         if alerting is not None:
             notify(alerting, payload)
 
+    def auto_recover(code, halt, why):
+        """Wait, then reconcile (live) before trading again. Returns an exit code to stop with."""
+        nonlocal mode
+        now = time.monotonic()
+        while recoveries and now-recoveries[0] >= 3600:
+            recoveries.popleft()
+        if len(recoveries) >= auto['max_per_hour']:
+            stop.touch(mode=0o600, exist_ok=True)
+            state('halted', exit_code=code, halt=halt, reason='Auto-recovery limit reached; STOP set for review')
+            return HALT
+        recoveries.append(now)
+        delay = min(300, 15*2**(len(recoveries)-1))
+        if halt.get('status') == 429:
+            delay = max(delay, 60)  # Let the per-minute rate budget refill.
+        state('auto_recovering', exit_code=code, reason=why, halt=halt, retry_in_seconds=delay,
+              recoveries_last_hour=len(recoveries))
+        deadline = time.monotonic()+delay
+        while time.monotonic() < deadline:
+            if stop.exists():
+                state('stopped', reason='STOP set during auto-recovery delay')
+                return 0
+            time.sleep(min(.25, max(0, deadline-time.monotonic())))
+        mode = 'recover' if live else 'run'
+        return None
+
     with exclusive_lock(directory), shutdown_signals():
         try:
             if stop.exists():
@@ -196,12 +239,28 @@ def watch(root, runtime, config, live=False, report=print):
                 child = subprocess.Popen(recovery_command if mode == 'recover' else command,
                                          cwd=str(root), start_new_session=True)
                 state('recovering' if mode == 'recover' else 'running')
+                stalled, next_check = None, time.monotonic()+STALL_CHECK_SECONDS
                 while child.poll() is None and not stop.exists():
                     time.sleep(.25)
+                    # A hung worker (e.g. a blocked file read) never exits, so restarts never fire.
+                    if stall_limit and mode == 'run' and time.monotonic() >= next_check:
+                        next_check = time.monotonic()+STALL_CHECK_SECONDS
+                        age = heartbeat_age(runtime, started_wall, time.time())
+                        if age > stall_limit:
+                            stalled = age
+                            break
                 if stop.exists():
                     stop_child(child)
                     state('stopped', reason='STOP is set')
                     return 0
+                if stalled is not None:
+                    stop_child(child)
+                    halt = {'at': time.time(), 'type': 'Stall', 'exit_code': child.returncode, 'status': None,
+                            'message': f'No main-loop heartbeat for {round(stalled)}s; worker stopped'}
+                    outcome = auto_recover(child.returncode, halt, 'stalled worker')
+                    if outcome is not None:
+                        return outcome
+                    continue
                 code = child.returncode
                 if mode == 'recover' and code == 0:
                     state('recovered', reason='Reconciliation succeeded; restarting normal trading')
@@ -213,28 +272,10 @@ def watch(root, runtime, config, live=False, report=print):
                     halt = None if intentional or mode == 'recover' else read_halt(runtime, started_wall)
                     why = recoverable(halt) if auto['enabled'] else None
                     if why:
-                        now = time.monotonic()
-                        while recoveries and now-recoveries[0] >= 3600:
-                            recoveries.popleft()
-                        if len(recoveries) >= auto['max_per_hour']:
-                            stop.touch(mode=0o600, exist_ok=True)
-                            state('halted', exit_code=code, halt=halt,
-                                  reason='Auto-recovery limit reached; STOP set for review')
-                            return HALT
-                        recoveries.append(now)
-                        delay = min(300, 15*2**(len(recoveries)-1))
-                        if halt.get('status') == 429:
-                            delay = max(delay, 60)  # Let the per-minute rate budget refill.
-                        state('auto_recovering', exit_code=code, reason=why, halt=halt, retry_in_seconds=delay,
-                              recoveries_last_hour=len(recoveries))
-                        deadline = time.monotonic()+delay
-                        while time.monotonic() < deadline:
-                            if stop.exists():
-                                state('stopped', reason='STOP set during auto-recovery delay')
-                                return 0
-                            time.sleep(min(.25, max(0, deadline-time.monotonic())))
                         # Reconcile first (live), then resume trading after a successful recovery.
-                        mode = 'recover' if live else 'run'
+                        outcome = auto_recover(code, halt, why)
+                        if outcome is not None:
+                            return outcome
                         continue
                     state('stopped' if intentional else 'halted', exit_code=code, halt=halt,
                           reason='Worker exited; no automatic restart for this exit code')

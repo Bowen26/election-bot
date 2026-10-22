@@ -113,3 +113,15 @@ Enable by adding `"recycle_enabled": true` to the `election_night` block and res
 **How it recovers:** the watcher waits (15 s, doubling up to 5 min; at least 60 s after a 429), runs `recover --wait`, then resumes trading. If that reconciliation fails, the bot halts normally; there is no retry loop. More than `max_per_hour` recoveries sets STOP. Each recovery sends an `auto_recovering` alert.
 
 **Still halts and alerts you:** everything else, including accounting inconsistencies, contract changes, the realized-loss stop, auth failures and configuration errors.
+
+**Hang watchdog:** a worker can freeze without exiting (for example, a file read that never returns), so crash restarts never fire. The worker's main loop touches `supervisor/heartbeat` at least every 15 s, including during pauses; helper threads cannot touch it. If no beat arrives for `stall_seconds` (default 600; `0` disables), the watcher stops the worker (SIGINT, then SIGTERM, then SIGKILL) and runs the same recovery path, with reason `stalled worker`. Stalls count toward `max_per_hour`.
+
+## Keep the runtime folder out of iCloud
+
+If `~/Documents` is synced by iCloud Drive, iCloud can replace runtime files with online-only placeholders. A read of such a file can block forever; on 2026-10-20 this froze the bot for 25 hours. The bot uses `.runtime.nosync/` when it exists (iCloud skips `*.nosync`) and `.runtime/` otherwise. To move it, with the bot stopped:
+
+```bash
+mv .runtime .runtime.nosync && ln -s .runtime.nosync .runtime
+```
+
+The symlink keeps old commands and scripts that name `.runtime` working.

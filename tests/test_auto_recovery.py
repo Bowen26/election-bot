@@ -95,3 +95,96 @@ class WatchTests(unittest.TestCase):
         code, kinds = self.run_watch([HALT, HALT], [RuntimeError('database is locked'), RuntimeError('database is locked')])
         self.assertEqual(kinds, ['run', 'recover'])
         self.assertEqual(code, HALT)
+
+
+class Hanging:
+    """A worker whose process stays alive; optional beat(now) runs on each poll."""
+    def __init__(self, beat=None, pid=101):
+        self.returncode, self.pid, self.beat, self.signals = None, pid, beat, []
+    def poll(self):
+        if self.returncode is None and self.beat:
+            self.returncode = self.beat()
+        return self.returncode
+    def send_signal(self, sig):
+        self.signals.append(sig)
+        self.returncode = -sig
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+class StallTests(unittest.TestCase):
+    setUp = WatchTests.setUp
+
+    def launch_sequence(self, processes, stall_seconds=600):
+        self.config.write_text(json.dumps({'auto_recovery': {'enabled': True, 'stall_seconds': stall_seconds}}))
+        children = []
+        def launch(command, **kwargs):
+            children.append(command)
+            return processes[len(children)-1]
+        with patch('election_bot.supervisor.time', self.clock), \
+             patch('election_bot.supervisor.subprocess.Popen', side_effect=launch):
+            code = watch(self.root, self.runtime, self.config, True, self.messages.append)
+        return code, ['recover' if 'recover' in c else 'run' for c in children]
+
+    def test_stalled_worker_is_killed_reconciled_and_restarted(self):
+        hung = Hanging()
+        code, kinds = self.launch_sequence([hung, Process(0), Process(0)])
+        self.assertEqual(kinds, ['run', 'recover', 'run'])
+        self.assertTrue(hung.signals)
+        recovering = [json.loads(m) for m in self.messages if json.loads(m)['status'] == 'auto_recovering']
+        self.assertEqual(recovering[0]['reason'], 'stalled worker')
+        self.assertEqual(recovering[0]['halt']['type'], 'Stall')
+        self.assertEqual(code, 0)
+
+    def test_beating_worker_is_left_alone(self):
+        import os
+        start = self.clock.now
+        beat = self.runtime/'supervisor'/'heartbeat'
+        def alive():
+            beat.touch()
+            os.utime(beat, (self.clock.now, self.clock.now))
+            return 0 if self.clock.now > start+3000 else None
+        hung = Hanging(alive)
+        code, kinds = self.launch_sequence([hung])
+        self.assertEqual((kinds, hung.signals, code), (['run'], [], 0))
+
+    def test_disabled_stall_check(self):
+        start = self.clock.now
+        hung = Hanging(lambda: 0 if self.clock.now > start+3000 else None)
+        code, kinds = self.launch_sequence([hung], stall_seconds=0)
+        self.assertEqual((kinds, hung.signals), (['run'], []))
+
+    def test_stall_setting_validation(self):
+        self.assertEqual(auto_settings({})['stall_seconds'], 600)
+        for bad in (60, 10000, '600', True):
+            with self.assertRaises(ValueError):
+                auto_settings({'auto_recovery': {'stall_seconds': bad}})
+
+
+class HeartbeatTests(unittest.TestCase):
+    def test_main_thread_only_and_throttled(self):
+        import threading
+        from election_bot import runner
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        path = Path(temp.name)/'heartbeat'
+        with patch.object(runner, 'HEARTBEAT', path), patch.object(runner, '_last_beat', None):
+            worker = threading.Thread(target=runner.beat, kwargs={'force': True})
+            worker.start(); worker.join()
+            self.assertFalse(path.exists())                 # helper threads cannot mask a hang
+            runner.beat()
+            self.assertTrue(path.exists())
+            first = path.stat().st_mtime_ns
+            runner.beat()                                   # throttled
+            self.assertEqual(path.stat().st_mtime_ns, first)
+            runner.beat(force=True)
+            self.assertTrue(path.exists())
+
+    def test_runtime_prefers_nosync(self):
+        from election_bot.__main__ import runtime_dir
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        self.assertEqual(runtime_dir(root), root/'.runtime')
+        (root/'.runtime.nosync').mkdir()
+        self.assertEqual(runtime_dir(root), root/'.runtime.nosync')
