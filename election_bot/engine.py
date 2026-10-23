@@ -39,6 +39,8 @@ def validate_config(config):
     cash_settings(config)
     from .supervisor import auto_settings
     auto_settings(config)
+    from .capital_rotation import settings as rotation_settings
+    rotation_settings(config)
     execution = config.get('execution', {})
     if execution.get('enabled'):
         if type(execution.get('priority_scanning', True)) is not bool:

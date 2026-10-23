@@ -95,6 +95,8 @@ class ActiveEngine(Engine):
         self._basket_budget_reported = None
         from .cash_reserve import settings as cash_settings
         self.cash_policy = cash_settings(self.config)
+        from .capital_rotation import Rotation
+        self.rotation = Rotation(self.config)
         self.scan_policy = 'priority_v1' if self.execution.get('priority_scanning', True) else 'news_round_robin'
         self.scanner.set_policy(self.scan_policy)
 
@@ -462,6 +464,11 @@ class ActiveEngine(Engine):
             return replace(signal, quantity=free)
         return signal
 
+    def night_exempt(self, action, reason, key):
+        """True for an election-night buy that may bypass the named control right now."""
+        from .election_night import REASON
+        return action == 'buy' and reason == REASON and self.election_night.exempt(key)
+
     def news_gate(self, mapping, signal):
         """News block for this signal; election-night buys may pass a generic uncertainty pause."""
         from .election_night import REASON, RECYCLE
@@ -486,7 +493,8 @@ class ActiveEngine(Engine):
                 raise InventoryValidationError('inventory_mismatch', 'Account inventory differs from bot ledger; race paused')
         return owned, cost
 
-    def available(self, exchange, account, reserve_floor=True):
+    def coin_rooms(self, exchange, account, reserve_floor=True):
+        """Each coin limit's remaining room; a sale relaxes only cash and total."""
         limits = self.config['limits']
         cash = D(account['myBalance'])
         if not self.live:
@@ -495,10 +503,48 @@ class ActiveEngine(Engine):
         if reserve_floor:
             from .cash_reserve import floor
             cash -= floor(self.cash_policy)  # Election-night reserve; zero once the window opens.
-        return max(D(0), min(D(limits['per_order']), cash,
-            D(limits['per_market']) - self.races.committed(self.ledger, exchange),
-            D(limits['total']) - self.ledger.committed(),
-            D(limits['daily']) - self.journal.used(today=True)))
+        return {'per_order': D(limits['per_order']), 'cash': cash,
+                'per_market': D(limits['per_market']) - self.races.committed(self.ledger, exchange),
+                'total': D(limits['total']) - self.ledger.committed(),
+                'daily': D(limits['daily']) - self.journal.used(today=True)}
+
+    def available(self, exchange, account, reserve_floor=True):
+        return max(D(0), min(self.coin_rooms(exchange, account, reserve_floor).values()))
+
+    def rotation_step(self, mapping, account, book, refs, settings, held, blocked_by_coins, signal,
+                      side_limits, buys_allowed, phase):
+        """Before election night: note an entry blocked only by coins, or sell part of a
+        nearly converged holding to fund one. Returns the signal to use."""
+        exchange = mapping['sig_exchange_id']
+        race = self.races.race(exchange)
+        hypothetical = None
+        if blocked_by_coins and signal is None and buys_allowed:
+            rooms = self.coin_rooms(exchange, account)
+            other = min(rooms['per_order'], rooms['per_market'], rooms['daily'])
+            if other > 0:
+                hypothetical = choose(book, refs, settings, other, None, side_limits)
+            if hypothetical is not None and held and ((held < 0) != (hypothetical.side == 'no')):
+                hypothetical = None  # Never fund a buy that would close or flip inventory.
+        if hypothetical is None:
+            self.rotation.clear(exchange)
+        else:
+            unit = hypothetical.price+D(self.config['strategy']['cost_buffer_per_share'])
+            desired = hypothetical.quantity*unit
+            # The sale must also refill any cash-floor shortfall before the buy can use it.
+            need = max(desired-rooms['cash'], desired-rooms['total'])
+            if self.rotation.note(exchange, race, hypothetical, need):
+                self.journal.event('capital_rotation_pending', {'exchange': exchange, 'race': race,
+                    'side': hypothetical.side, 'ask': str(hypothetical.price), 'edge': str(hypothetical.edge),
+                    'need_coins': str(need), 'phase': phase})
+        if signal is not None or not held:
+            return signal
+        detail = {}
+        sale = self.rotation.propose(book, refs, held, exchange, race, self.config['limits']['per_order'], detail)
+        sale = self.cap_basket_sale(sale, exchange, held, detail)
+        if detail.get('reason') not in ('no_pending_entry', 'disabled_or_no_position'):
+            self.journal.event('capital_rotation_decision', {**detail, 'exchange': exchange, 'race': race,
+                               'snapshot_id': self.latest_snapshot_id, 'phase': phase})
+        return sale
 
     def portfolio_summary(self):
         return {**self.ledger.summary(), **self.races.summary(self.ledger)}
@@ -524,6 +570,7 @@ class ActiveEngine(Engine):
             raise ReservationRejected('Basket legs are NO buys with basket context', gate='pair_basket')
         if swap and (basket_context is None or payload['action'] != 'sell' or payload['side'] != 'yes'):
             raise ReservationRejected('Swap sales are YES sells with basket context', gate='pair_basket')
+        from .election_night import REASON as NIGHT
         def guard():
             nonlocal drawdown_rejected, position_rejected
             self.ledger.inventory(refresh=True)  # Include any newly committed execution.
@@ -539,13 +586,17 @@ class ActiveEngine(Engine):
                 raise RuntimeError('Reservation amount disagrees with order')
             if payload['action'] == 'buy':
                 drawdown = self.drawdown.status(persist=False)
-                if not drawdown['buy_allowed']:
+                if not drawdown['buy_allowed'] and not self.night_exempt(payload['action'], exit_reason, 'ignore_drawdown_pause'):
                     drawdown_rejected = True
                     raise ReservationRejected('New buys paused: '+drawdown['reason'], gate='portfolio_drawdown')
                 if basket:
                     held, _ = self.held(exchange, positions)
                     if held > 0:
                         raise ReservationRejected('Basket NO leg would oppose held YES', gate='pair_basket')
+                elif self.night_exempt(payload['action'], exit_reason, 'ignore_position_guard'):
+                    held, _ = self.held(exchange, positions)
+                    if held and payload['side'] != ('yes' if held > 0 else 'no'):
+                        raise ReservationRejected('Additional buy would oppose existing inventory', gate='position_entry_guard')
                 elif self.position_guard.policy['enabled']:
                     held, _ = self.held(exchange, positions)
                     if held:
@@ -561,7 +612,6 @@ class ActiveEngine(Engine):
                         if not checked['buy_allowed']:
                             position_rejected = (mapping, book, held)
                             raise ReservationRejected('Additional buys paused: '+checked['reason'], gate='position_entry_guard')
-                from .election_night import REASON as NIGHT
                 night_exempt = (exit_reason == NIGHT and self.election_night.active()
                                 and self.election_night.policy['ignore_reentry_cooldown'])
                 if self.reentry_wait(exchange) and not (night_exempt or basket):
@@ -591,7 +641,8 @@ class ActiveEngine(Engine):
             if exposure.enabled:
                 if self.live:
                     verify_account_inventory(self.ledger, positions)
-                if D(payload['quantity']) > exposure.headroom(exchange, payload['action'], payload['side']):
+                if (not self.night_exempt(payload['action'], exit_reason, 'ignore_exposure_caps')
+                        and D(payload['quantity']) > exposure.headroom(exchange, payload['action'], payload['side'])):
                     raise ReservationRejected('Exposure changed before reservation', gate='exposure_headroom')
             if exit_reason == 'model_fair_value':
                 from . import model_live
@@ -782,6 +833,7 @@ class ActiveEngine(Engine):
                       'reason': 'selling_disabled' if held else 'no_position'}
         settings = self.entry_settings(mapping)
         entry = choose(book, refs, settings, self.available(exchange, account), diagnostics, side_limits)
+        blocked_by_coins = entry is None and any(c.get('reason') == 'budget_or_target_depth' for c in diagnostics)
         reason_gates = {'reference_depth':'reference_depth', 'price_gap':'reference_price_gap',
                         'exposure_limit':'exposure_headroom', 'budget_or_target_depth':'coin_or_target_depth'}
         for check in diagnostics:
@@ -844,16 +896,26 @@ class ActiveEngine(Engine):
             self.gate_block('news_pause', phase, exchange)
         if self.election_night.active():
             night = {}
+            controls = (('drawdown_pause', drawdown['buy_allowed'], 'ignore_drawdown_pause'),
+                        ('position_guard', position_guard['buy_allowed'], 'ignore_position_guard'))
+            blocking = [name for name, ok, key in controls if not ok and not self.election_night.exempt(key)]
+            bypassed = [name for name, ok, key in controls if not ok and self.election_night.exempt(key)]
+            if bypassed:
+                night['bypassed'] = bypassed
             if signal is not None:
                 night.update(status='not_evaluated', reason='other_signal_selected')
-            elif not (drawdown['buy_allowed'] and position_guard['buy_allowed']):
-                night.update(status='blocked', reason='drawdown_or_position_guard')
+            elif blocking:
+                night.update(status='blocked', reason='drawdown_or_position_guard', blocking=blocking)
             elif reentry_wait and not self.election_night.policy['ignore_reentry_cooldown']:
                 night.update(status='blocked', reason='reentry_cooldown')
             else:
                 cash = D(account['myBalance']) - (D(0) if self.live else self.ledger.committed())
+                # A called race no longer moves with the others; per-race and total coin limits still apply.
+                limits = None if self.election_night.exempt('ignore_exposure_caps') else side_limits
+                if side_limits is not None and limits is None:
+                    night['exposure_caps'] = 'not_applied_to_called_race'
                 signal = self.election_night.select(book, refs, self.available(exchange, account, reserve_floor=False),
-                                                    held, side_limits, night, exchange=exchange, cash=cash)
+                                                    held, limits, night, exchange=exchange, cash=cash)
             if signal is None and held:
                 # Optional: free coins from a called, nearly settled holding for a better pending buy.
                 from .election_night import recycle
@@ -868,6 +930,10 @@ class ActiveEngine(Engine):
             self.journal.event('election_night_decision', {**night, 'exchange': exchange,
                                'news_restricted': news_restricted,
                                'snapshot_id': self.latest_snapshot_id, 'phase': phase})
+        if self.rotation.enabled and not self.election_night.active():
+            signal = self.rotation_step(mapping, account, book, refs, settings, held, blocked_by_coins, signal,
+                side_limits, drawdown['buy_allowed'] and position_guard['buy_allowed'] and not reentry_wait
+                and not news_restricted, phase)
         self.latest_model_context = None
         if signal is None and not news_restricted and drawdown['buy_allowed'] and position_guard['buy_allowed'] and not reentry_wait and self.config.get('model_trading',{}).get('enabled'):
             from . import model_live
@@ -1339,7 +1405,8 @@ class ActiveEngine(Engine):
             if exposure.enabled:
                 if self.live:
                     verify_account_inventory(self.ledger, positions)
-                if signal.quantity > exposure.headroom(exchange, signal.action, signal.side):
+                if (not self.night_exempt(signal.action, signal.reason, 'ignore_exposure_caps')
+                        and signal.quantity > exposure.headroom(exchange, signal.action, signal.side)):
                     self.gate_block('exposure_headroom', 'pre_submit', exchange)
                     self.report('skip', {'exchange': exchange, 'reason': 'Exposure changed before submission'})
                     continue
@@ -1376,6 +1443,9 @@ class ActiveEngine(Engine):
                 self.ledger.record(payload, paper_quantity, signal.price if paper_quantity else 0, fee)
                 self.report('paper_fill', {'exchange': exchange, **vars(signal),
                     'filled':paper_quantity, 'simulation':True, 'resting_fill_not_modeled':signal.reason=='patient_entry'})
+            from .capital_rotation import REASON as ROTATION
+            if signal.reason == ROTATION:
+                self.rotation.sold(signal.quantity*signal.price)  # Shared cash: every pending need shrinks.
             orders += 1
             self._scan_metrics['orders'] = orders
             self.check_loss_stop()

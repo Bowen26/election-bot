@@ -107,6 +107,9 @@ def report(runtime, config, now=None):
         result['orders_1h'] = [{'market': names.get(o['exchange'], o['exchange']), 'action': o['action'],
                                 'side': o['side'], 'filled': o['filled'], 'price': o.get('average_fill_price')}
                                for o in orders][-10:]
+        rotation = [json.loads(d) for (d,) in db.execute(
+            "SELECT detail FROM events WHERE kind='capital_rotation_decision' AND at>?", (now-3600,))]
+        result['rotation_1h'] = dict(Counter(c.get('reason') for c in rotation))
         errors = Counter()
         for kind, d in db.execute("SELECT kind, detail FROM events WHERE at>? AND kind IN "
                                   "('feed_error','election_radar_skip','drawdown_fair_mark_skip')", (now-900,)):
@@ -117,7 +120,8 @@ def report(runtime, config, now=None):
     night = config.get('election_night', {})
     result['election_night'] = {'enabled': night.get('enabled', False), 'recycle_enabled': night.get('recycle_enabled', False),
                                 'window': [night.get('start_at', '2026-11-03T18:00:00-05:00'), night.get('end_at', '2026-11-04T12:00:00-05:00')]}
-    result['features'] = {'pair_baskets': config.get('pair_baskets', {}).get('enabled', False),
+    result['features'] = {'capital_rotation': config.get('capital_rotation', {}).get('enabled', False),
+                          'pair_baskets': config.get('pair_baskets', {}).get('enabled', False),
                           'settlement_exits': config.get('settlement_exits', {}).get('enabled', False),
                           'alerts': config.get('alerts', {}).get('enabled', False),
                           'drawdown_valuation': config.get('drawdown_control', {}).get('valuation', 'sig_bid')}
@@ -153,6 +157,8 @@ def format_report(r):
         lines.append(f"Baskets: {b['matched_sets']:,} matched sets in {b['races']} races, guaranteed {b['guaranteed_profit']:+,.2f}; "
                      f"unmatched {b['unmatched'] or 'none'}")
     lines.append(f"Basket checks (1h): {r['basket_checks_1h']}")
+    if r.get('rotation_1h'):
+        lines.append(f"Rotation checks (1h): {r['rotation_1h']}")
     lines.append('Orders (1h): ' + ('; '.join(f"{o['market']} {o['action']} {o['side']} {o['filled']}@{o['price']}" for o in r['orders_1h']) or 'none'))
     lines.append(f"Errors (15 min): {r['errors_15m'] or 'none'}")
     n, f = r['election_night'], r['features']

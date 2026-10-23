@@ -8,8 +8,8 @@ Inside `[start_at, end_at)` (defaults: Nov 3 6:00pm ET → Nov 4 12:00pm ET), fo
 
 1. **Called side:** both Kalshi and Polymarket are fresh and bid the same side at or above `min_reference_bid` (0.95).
 2. **Lagging SIG:** the SIG ask on that side is at or below `max_price` (0.99) and at least `min_edge` (2¢) below the average reference midpoint.
-3. **Size:** the smallest of available coins (your per-order, per-market, total and daily limits and cash), `max_shares` (2,000), `strategy.max_shares_per_order`, `depth_fraction` (50%) of the displayed SIG ask, and exposure headroom.
-4. **Never:** buying against held inventory, or overriding the drawdown pause or the position-entry guard.
+3. **Size:** the smallest of available coins (your per-order, per-market, total and daily limits and cash), `max_shares` (2,000), `strategy.max_shares_per_order` and `depth_fraction` (50%) of the displayed SIG ask.
+4. **Never:** buying against held inventory.
 
 The route only acts when no other signal was selected. Exits, including settlement-gated exits, keep priority.
 
@@ -17,6 +17,10 @@ The route only acts when no other signal was selected. Exits, including settleme
 
 - **News-uncertainty pauses.** Results headlines trigger these all night. While a race is paused, only this route may trade it, so no ordinary entries, exits or model buys. Set `"override_news_pauses": false` to keep them.
 - **The reentry cooldown after a sale.** Set `"ignore_reentry_cooldown": false` to keep it.
+- **The portfolio drawdown pause.** On election night, losing a single large position pushes fair-value P&L 2,500 or more below its peak. Sixteen holdings are big enough on their own; the chance at least one loses is about 60%. Once paused, buying would stop for the rest of the night, even for nearly settled races. Set `"ignore_drawdown_pause": false` to keep it. Ordinary entries still respect the pause.
+- **The position-entry guard,** which rebuilds price history after every restart. The rule against buying opposite held inventory still applies. Set `"ignore_position_guard": false` to keep it.
+- **Net-share exposure caps** (total, per office, per region). A called race no longer moves with the others; the Northeast cap alone would otherwise allow only about 1,000 more shares across MA, RI, CT, NY and ME. Per-race, per-order, total and daily coin limits still apply. Set `"ignore_exposure_caps": false` to keep them.
+- Bypassed controls are journaled per decision (`bypassed`, `exposure_caps`).
 - **Never overridden:** disputed-result reviews, the no-healthy-news-feed block, STOP, the realized-loss stop, clock checks and reservation-time rechecks.
 
 Called races also get scan priority (score 250, above near-entry). Every evaluation in the window is journaled as `election_night_decision`.
@@ -114,6 +118,8 @@ Enable by adding `"recycle_enabled": true` to the `election_night` block and res
 
 **Still halts and alerts you:** everything else, including accounting inconsistencies, contract changes, the realized-loss stop, auth failures and configuration errors.
 
+**Sleep:** with the lid closed, macOS wakes briefly about once a minute without running the bot. The watcher treats a gap of more than 30 s between its own loop turns as sleep and restarts the stall window at wake, so it does not stop and recover a healthy worker after every wake. Keep the Mac plugged in with the lid open on election night: a sleeping Mac cannot trade.
+
 **Hang watchdog:** a worker can freeze without exiting (for example, a file read that never returns), so crash restarts never fire. The worker's main loop touches `supervisor/heartbeat` at least every 15 s, including during pauses; helper threads cannot touch it. If no beat arrives for `stall_seconds` (default 600; `0` disables), the watcher stops the worker (SIGINT, then SIGTERM, then SIGKILL) and runs the same recovery path, with reason `stalled worker`. Stalls count toward `max_per_hour`.
 
 ## Keep the runtime folder out of iCloud
@@ -121,7 +127,7 @@ Enable by adding `"recycle_enabled": true` to the `election_night` block and res
 If `~/Documents` is synced by iCloud Drive, iCloud can replace runtime files with online-only placeholders. A read of such a file can block forever; on 2026-10-20 this froze the bot for 25 hours. The bot uses `.runtime.nosync/` when it exists (iCloud skips `*.nosync`) and `.runtime/` otherwise. To move it, with the bot stopped:
 
 ```bash
-mv .runtime .runtime.nosync && ln -s .runtime.nosync .runtime
+mv .runtime .runtime.nosync
 ```
 
-The symlink keeps old commands and scripts that name `.runtime` working.
+Do not add a `.runtime` symlink back: iCloud treats it as a conflict with the old folder and renames it (on this Mac it became `.runtime 2`). The bot never needs it.

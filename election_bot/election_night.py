@@ -22,6 +22,9 @@ RECYCLE = 'election_night_recycle'
 DEFAULTS = dict(enabled=False, start_at='2026-11-03T18:00:00-05:00', end_at='2026-11-04T12:00:00-05:00',
                 min_reference_bid='0.95', min_edge='0.02', max_price='0.99', depth_fraction='0.5',
                 max_shares=2000, ignore_reentry_cooldown=True, override_news_pauses=True,
+                # Called-race buys are nearly settled: a portfolio drawdown, the post-restart
+                # position guard or correlated net-share caps should not switch them off.
+                ignore_drawdown_pause=True, ignore_position_guard=True, ignore_exposure_caps=True,
                 radar_seconds=20, radar_max_age_seconds=120, radar_metadata_per_cycle=15,
                 pause_research_reads=True, drawdown_refresh_per_cycle=2,
                 recycle_enabled=False, recycle_margin='0.01', recycle_max_giveup='0.02',
@@ -41,7 +44,8 @@ def settings(config):
     if not isinstance(raw, dict) or set(raw)-set(DEFAULTS):
         raise ValueError('Invalid election_night configuration')
     p = dict(DEFAULTS, **raw)
-    for key in ('enabled', 'ignore_reentry_cooldown', 'override_news_pauses'):
+    for key in ('enabled', 'ignore_reentry_cooldown', 'override_news_pauses', 'ignore_drawdown_pause',
+                'ignore_position_guard', 'ignore_exposure_caps'):
         if type(p[key]) is not bool:
             raise ValueError('election_night %s must be boolean' % key)
     p['start'], p['end'] = timestamp(p['start_at']), timestamp(p['end_at'])
@@ -82,6 +86,10 @@ class ElectionNight:
     def active(self, now=None):
         now = time.time() if now is None else now
         return self.policy['enabled'] and self.policy['start'] <= now < self.policy['end']
+
+    def exempt(self, key, now=None):
+        """True when a called-race buy may bypass the named control right now."""
+        return self.active(now) and self.policy[key]
 
     def overrides(self, news_reason, now=None):
         """True only for generic uncertainty pauses, inside the window."""

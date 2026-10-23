@@ -286,3 +286,80 @@ class RecycleTests(unittest.TestCase):
                                                       'need_coins': D('50'), 'at': time.time()}
             engine.cycle()
             self.assertEqual([o['action'] for o in sig.orders.values()], expected)
+
+
+class FakeExposure:
+    """Net-share caps that are already full in every direction."""
+    enabled = True
+    def __init__(self, ledger, config):
+        pass
+    def headroom(self, exchange, action, side):
+        return D(0)
+    def summary(self):
+        return {'enabled': True}
+
+
+class NightControlTests(unittest.TestCase):
+    """Called-race buys bypass the drawdown pause, position guard and net-share caps."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+
+    def run_cycle(self, window, prepare):
+        from unittest.mock import patch
+        config, original, refs = fixture()
+        config['execution'] = dict(test_active.EXECUTION)
+        config['election_night'] = window
+        sig = test_active.Broker(original)
+        mapping = config['markets'][0]
+        mapping['sig_market_id'] = '2'
+        mapping['contract_fingerprint'] = fingerprint(contract_record(sig.market('2'), mapping, refs.metadata(mapping)))
+        refs.books = Mock(side_effect=lambda m, md: [book('.96', '.98', 500, 'Kalshi'),
+                                                      book('.96', '.98', 500, 'Polymarket')])
+        sig.prices['2'] = ('.90', '.92')
+        journal = Journal(Path(self.temp.name)/('j%d.db' % id(config)), 'test')
+        self.addCleanup(journal.close)
+        from contextlib import nullcontext
+        with patch('election_bot.active_engine.Exposure', FakeExposure) if prepare == 'exposure' else nullcontext():
+            engine = ActiveEngine(config, sig, refs, journal, self.temp.name, live=True)
+            if prepare == 'drawdown':
+                paused = {'buy_allowed': False, 'reason': 'drawdown_paused', 'enabled': True}
+                engine.drawdown.status = Mock(return_value=paused)
+            if prepare == 'guard':
+                engine.position_guard.check = Mock(return_value={'buy_allowed': False,
+                                                                 'reason': 'position_history_insufficient'})
+            engine.cycle()
+        decisions = [json.loads(r[0]) for r in journal.db.execute(
+            "SELECT detail FROM events WHERE kind='election_night_decision'")]
+        return sig, decisions
+
+    def test_drawdown_pause_does_not_stop_called_race_buys(self):
+        sig, decisions = self.run_cycle(live_window(), 'drawdown')
+        self.assertEqual([(o['action'], o['side']) for o in sig.orders.values()], [('buy', 'yes')])
+        self.assertTrue(any('drawdown_pause' in d.get('bypassed', []) for d in decisions))
+        sig, decisions = self.run_cycle(dict(live_window(), ignore_drawdown_pause=False), 'drawdown')
+        self.assertEqual(sig.orders, {})
+        self.assertTrue(any(d.get('blocking') == ['drawdown_pause'] for d in decisions))
+
+    def test_position_guard_does_not_stop_called_race_buys(self):
+        sig, _ = self.run_cycle(live_window(), 'guard')
+        self.assertEqual(len(sig.orders), 1)
+        sig, _ = self.run_cycle(dict(live_window(), ignore_position_guard=False), 'guard')
+        self.assertEqual(sig.orders, {})
+
+    def test_full_exposure_caps_do_not_stop_called_race_buys(self):
+        sig, decisions = self.run_cycle(live_window(), 'exposure')
+        self.assertEqual(len(sig.orders), 1)
+        self.assertTrue(any(d.get('exposure_caps') == 'not_applied_to_called_race' for d in decisions))
+        sig, _ = self.run_cycle(dict(live_window(), ignore_exposure_caps=False), 'exposure')
+        self.assertEqual(sig.orders, {})
+
+    def test_bypass_flags_validated(self):
+        self.assertTrue(settings({'election_night': OPEN})['ignore_drawdown_pause'])
+        with self.assertRaises(ValueError):
+            settings({'election_night': dict(OPEN, ignore_exposure_caps='yes')})
+
+    def test_outside_window_nothing_is_bypassed(self):
+        n = night()
+        self.assertFalse(n.exempt('ignore_drawdown_pause', now=time.time()))   # OPEN window is in 2020
+        self.assertTrue(n.exempt('ignore_drawdown_pause', now=n.policy['start']+1))

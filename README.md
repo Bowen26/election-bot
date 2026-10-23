@@ -341,6 +341,12 @@ The competition scores balances after settlement, and the platform charges no fe
 
 `election_night` (off by default) buys races both Kalshi and Polymarket bid at 0.95+ when SIG still lags by at least 2¢. It runs only from Nov 3 6pm ET to the Nov 4 noon close, and for this route only it overrides generic news pauses (never disputed results). Rehearse with `python3 -m election_bot election-night-rehearsal`. See [election-night mode](docs/election-night.md) for the rule, overrides, pre-election checklist and activation.
 
+Inside that window, called-race buys also bypass the drawdown pause, the post-restart position guard and net-share exposure caps; per-race and coin limits still apply. Each bypass can be switched off.
+
+## Pre-election capital rotation
+
+`capital_rotation` (off by default) sells part of a holding whose SIG bid is within 2¢ of reference fair value when that funds an ordinary entry blocked only by coins, with a net gain of at least 3¢ per share sold. It never runs during the election-night window. See [pre-election rotation](docs/pre-election-rotation.md).
+
 ## Swing stress test and party-pair scan
 
 `python3 -m election_bot swing-risk` stress-tests holdings against a uniform national swing at reference fair value. `python3 -m election_bot pair-arbitrage` scans SIG's per-party markets for baskets priced away from 1 (paced reads, no orders). See [risk and arbitrage reports](docs/risk-and-arbitrage-reports.md).

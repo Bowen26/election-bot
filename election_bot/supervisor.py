@@ -51,6 +51,9 @@ def restartable(code):
 # stall_seconds: kill and reconcile a worker whose main loop stops beating (0 disables).
 AUTO_DEFAULTS = dict(enabled=False, max_per_hour=6, stall_seconds=600)
 STALL_CHECK_SECONDS = 5
+# A longer gap between watcher loop turns means the Mac was asleep (lid closed, brief
+# background wakes). The worker could not beat either, so stall time restarts at wake.
+SLEEP_GAP_SECONDS = 30
 SAFE_HALT_TYPES = {'APIError', 'JSONDecodeError', 'TimeoutError', 'ConnectionError', 'ConnectionResetError',
                    'ConnectionRefusedError', 'BrokenPipeError', 'URLError', 'RemoteDisconnected',
                    'IncompleteRead', 'SSLError', 'ClockSampleUnavailable', 'RecoveryHistoryUnavailable'}
@@ -240,12 +243,17 @@ def watch(root, runtime, config, live=False, report=print):
                                          cwd=str(root), start_new_session=True)
                 state('recovering' if mode == 'recover' else 'running')
                 stalled, next_check = None, time.monotonic()+STALL_CHECK_SECONDS
+                stall_since, last_turn = started_wall, time.time()
                 while child.poll() is None and not stop.exists():
                     time.sleep(.25)
+                    turn = time.time()
+                    if turn-last_turn > SLEEP_GAP_SECONDS:
+                        stall_since = turn  # Asleep, not hung: give the worker a full window after wake.
+                    last_turn = turn
                     # A hung worker (e.g. a blocked file read) never exits, so restarts never fire.
                     if stall_limit and mode == 'run' and time.monotonic() >= next_check:
                         next_check = time.monotonic()+STALL_CHECK_SECONDS
-                        age = heartbeat_age(runtime, started_wall, time.time())
+                        age = heartbeat_age(runtime, stall_since, turn)
                         if age > stall_limit:
                             stalled = age
                             break

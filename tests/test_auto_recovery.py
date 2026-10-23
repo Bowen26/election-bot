@@ -148,6 +148,42 @@ class StallTests(unittest.TestCase):
         code, kinds = self.launch_sequence([hung])
         self.assertEqual((kinds, hung.signals, code), (['run'], [], 0))
 
+    def test_sleep_gap_is_not_a_stall(self):
+        import os
+        beat = self.runtime/'supervisor'/'heartbeat'
+        state = {'slept': False}
+        start = self.clock.now
+        def worker():
+            if not state['slept']:
+                state['slept'] = True
+                self.clock.now += 1200          # lid closed: wall clock jumps, nobody ran
+                state['woke'] = self.clock.now
+                return None
+            if self.clock.now > state['woke']+60:  # beats again shortly after wake
+                beat.touch()
+                os.utime(beat, (self.clock.now, self.clock.now))
+            return 0 if self.clock.now > start+3000 else None
+        hung = Hanging(worker)
+        code, kinds = self.launch_sequence([hung])
+        self.assertEqual((kinds, hung.signals, code), (['run'], [], 0))
+
+    def test_worker_still_hung_after_wake_is_stopped_later(self):
+        state = {}
+        def worker():
+            if 'woke' not in state:
+                self.clock.now += 1200
+                state['woke'] = self.clock.now
+            return None
+        hung = Hanging(worker)
+        original = hung.send_signal
+        def signal_at(sig):
+            state['killed'] = self.clock.now
+            original(sig)
+        hung.send_signal = signal_at
+        code, kinds = self.launch_sequence([hung, Process(0), Process(0)])
+        self.assertEqual(kinds, ['run', 'recover', 'run'])
+        self.assertGreaterEqual(state['killed']-state['woke'], 600)   # a full window after wake
+
     def test_disabled_stall_check(self):
         start = self.clock.now
         hung = Hanging(lambda: 0 if self.clock.now > start+3000 else None)

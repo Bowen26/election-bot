@@ -1,7 +1,5 @@
 .env
-.runtime/
-.runtime
-.runtime.nosync/
+.runtime*
 config.json
 __pycache__/
 *.pyc

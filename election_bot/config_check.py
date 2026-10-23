@@ -25,6 +25,9 @@ def report(config_path):
         'risk_exits': get('risk_exit', 'enabled', False),
         'election_night': get('election_night', 'enabled', False),
         'election_night_recycling': get('election_night', 'recycle_enabled', False),
+        'night_ignores_drawdown': get('election_night', 'ignore_drawdown_pause', True),
+        'night_ignores_exposure_caps': get('election_night', 'ignore_exposure_caps', True),
+        'capital_rotation': get('capital_rotation', 'enabled', False),
         'pair_baskets': get('pair_baskets', 'enabled', False),
         'research_followups': get('research_followups', 'enabled', False),
         'alerts': get('alerts', 'enabled', False),
@@ -39,7 +42,9 @@ def report(config_path):
     result['caps'] = {'pair_baskets_total_coins': get('pair_baskets', 'total_coins'),
                       'pair_baskets_min_edge': get('pair_baskets', 'min_edge'),
                       'model_total': get('model_trading', 'total'),
-                      'drawdown_pause_coins': get('drawdown_control', 'pause_coins')}
+                      'drawdown_pause_coins': get('drawdown_control', 'pause_coins'),
+                      'rotation_max_giveup': get('capital_rotation', 'max_giveup', '0.02') if get('capital_rotation', 'enabled', False) else None,
+                      'rotation_min_gain': get('capital_rotation', 'min_gain', '0.03') if get('capital_rotation', 'enabled', False) else None}
     return result
 
 
