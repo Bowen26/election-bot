@@ -10,6 +10,7 @@ Before election night the bot can be fully invested: ordinary entries with 6–1
 2. **A converged holding:** its SIG bid is at most `max_giveup` (2¢) below fair value, the average of the Kalshi and Polymarket midpoints. Basket-locked shares are never sold, nor shares in the pending entry's own race.
 3. **Clearly better:** per share sold, `(bid / target ask) × target edge − give-up ≥ min_gain` (3¢). The target edge is the conservative entry measure: lower reference bid − ask − buffer.
 4. **Size:** enough to cover the coins the entry needs, capped by the holding, `depth_fraction` (50%) of the SIG bid, `max_shares` (2,000), shares per order and per-order coins.
+5. **Not tiny:** a sale worth less than `min_sale_coins` (25) is skipped. On Oct 23, 1-share sales added orders without moving capital, and one of them timed out and stopped the bot.
 
 Proceeds shrink every pending need, since cash is shared, so two holdings do not both sell for the same entry. The sold race then sits out the usual 30-minute reentry cooldown, which prevents buying it straight back. The entry buys on its next visit through the ordinary route, with every ordinary check.
 
@@ -23,6 +24,7 @@ Proceeds shrink every pending need, since cash is shared, so two holdings do not
 | `pending_seconds` | `900` | How long a blocked entry stays a funding target without a fresh visit |
 | `depth_fraction` | `0.5` | Share of the displayed SIG bid one sale may take |
 | `max_shares` | `2000` | Shares per sale |
+| `min_sale_coins` | `25` | Smallest sale worth placing, in coins |
 
 ## Watching it
 

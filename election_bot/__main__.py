@@ -94,6 +94,11 @@ def main():
     recover = sub.add_parser('recover', help='Reconcile live pending orders; replay unknown requests only after expiration')
     recover.add_argument('--wait', action='store_true',
                          help='Wait past expiration and refresh SIG timing; honors STOP (used by watch --live)')
+    release = sub.add_parser('release-unplaced', help='One-time operator release of an expired, never-acknowledged '
+                             'order that SIG has no record of; refuses unless every check passes')
+    release.add_argument('--key', required=True, help='Idempotency key of the single pending order')
+    release.add_argument('--starting-cash', default='100000', help='Tournament starting balance for the cash check')
+    release.add_argument('--dry-run', action='store_true', help='Run every check and print the evidence; change nothing')
     sub.add_parser('stop', help='Write the stop signal; does not liquidate holdings')
     sub.add_parser('resume', help='Clear the stop signal; does not launch the bot')
     sub.add_parser('status', help='Read local spending and pending-order status')
@@ -476,6 +481,25 @@ def main():
             sig = Sig(token, config['tournament_slug'])
         if args.command == 'clock-check':
             output(sig.check_clock())
+            return
+        if args.command == 'release-unplaced':
+            from .ledger import Ledger
+            from .manual_release import ReleaseRefused, release_unplaced
+            from .strategy import D
+            with exclusive_lock(RUNTIME):  # Refuses while the bot or its watcher holds the runtime.
+                binding = fingerprint({'tournament': sig.tid, 'key_hash': hashlib.sha256(token.encode()).hexdigest()})
+                journal = Journal(RUNTIME / 'live.sqlite3', binding)
+                try:
+                    result = release_unplaced(journal, Ledger(journal), sig, args.key, D(args.starting_cash),
+                                              D(config['strategy']['cost_buffer_per_share']), dry_run=args.dry_run)
+                except ReleaseRefused as error:
+                    output({'released': False, 'refused': str(error), 'note': 'Nothing was changed.'})
+                    raise SystemExit(2)
+                finally:
+                    journal.close()
+            output(result)
+            print('Dry run: every check passed; nothing was changed.' if args.dry_run else
+                  'Released. STOP is unchanged: review, then run resume and watch --live.')
             return
         if args.command == 'discover':
             output({'tournament': sig.tournament, 'markets': sig.markets(args.search)})

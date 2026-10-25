@@ -31,8 +31,9 @@ class SettingsTests(unittest.TestCase):
     def test_off_by_default_and_validated(self):
         self.assertFalse(settings({})['enabled'])
         self.assertEqual(settings({})['max_giveup'], D('.02'))
+        self.assertEqual(settings({})['min_sale_coins'], D('25'))
         for bad in ({'enabled': 'yes'}, {'max_giveup': '.06'}, {'min_gain': '0'}, {'pending_seconds': 5},
-                    {'depth_fraction': '0'}, {'max_shares': 0}, {'unknown': 1}):
+                    {'depth_fraction': '0'}, {'max_shares': 0}, {'min_sale_coins': '-1'}, {'unknown': 1}):
             with self.assertRaises(ValueError):
                 settings({'capital_rotation': bad})
 
@@ -61,7 +62,8 @@ class ProposeTests(unittest.TestCase):
         cases = [('disabled_or_no_position', rotation(enabled=False), book('.94', '.95'), 5000, {}),
                  ('giveup_above_maximum', rotation(), book('.93', '.94'), 5000, {}),          # 2.4c below fair
                  ('gain_below_minimum', rotation(), book('.94', '.95'), 5000, {'edge': '.02'}),
-                 ('size_below_one_share', rotation(), book('.94', '.95', 1), 5000, {})]
+                 ('size_below_one_share', rotation(), book('.94', '.95', 1), 5000, {}),
+                 ('sale_below_minimum', rotation(), book('.94', '.95', 4), 5000, {})]       # 2 shares = 1.88 coins
         for reason, r, sig, held, change in cases:
             r.note('target', 'race:t', target(**change), D('1000'), now)
             detail = {}
@@ -98,7 +100,7 @@ class EngineTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         config, original, refs = fixture()
         config['execution'] = dict(test_active.EXECUTION)
-        config['capital_rotation'] = {'enabled': enabled}
+        config['capital_rotation'] = {'enabled': enabled, 'min_sale_coins': '10'}  # demo per-order cap is 25 coins
         sig = test_active.Broker(original)
         held = config['markets'][0]
         held['sig_market_id'] = '2'

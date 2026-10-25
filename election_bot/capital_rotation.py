@@ -20,7 +20,7 @@ from .strategy import D, Signal
 
 REASON = 'capital_rotation'
 DEFAULTS = dict(enabled=False, max_giveup='0.02', min_gain='0.03', pending_seconds=900,
-                depth_fraction='0.5', max_shares=2000)
+                depth_fraction='0.5', max_shares=2000, min_sale_coins='25')
 
 
 def settings(config):
@@ -30,12 +30,14 @@ def settings(config):
     p = dict(DEFAULTS, **raw)
     if type(p['enabled']) is not bool:
         raise ValueError('capital_rotation enabled must be boolean')
-    for key in ('max_giveup', 'min_gain', 'depth_fraction'):
+    for key in ('max_giveup', 'min_gain', 'depth_fraction', 'min_sale_coins'):
         p[key] = D(p[key])
     if not 0 <= p['max_giveup'] <= D('.05'):
         raise ValueError('capital_rotation max_giveup must be from 0 to 0.05')
     if not D('.005') <= p['min_gain'] <= D('.50'):
         raise ValueError('capital_rotation min_gain must be from 0.005 to 0.50')
+    if not 0 <= p['min_sale_coins'] <= 1000:
+        raise ValueError('capital_rotation min_sale_coins must be from 0 to 1000')
     if not 0 < p['depth_fraction'] <= 1:
         raise ValueError('capital_rotation depth_fraction must be above 0 and at most 1')
     if type(p['pending_seconds']) is not int or not 60 <= p['pending_seconds'] <= 3600:
@@ -115,6 +117,10 @@ class Rotation:
                            D(self.strategy['max_shares_per_order']), D(per_order)/bid))
         if quantity < 1:
             detail['reason'] = 'size_below_one_share'
+            return None
+        if quantity*bid < p['min_sale_coins']:
+            # Tiny sales add orders (and failure points) without moving meaningful capital.
+            detail.update(reason='sale_below_minimum', quantity=quantity)
             return None
         detail.update(status='eligible', reason=REASON, quantity=quantity)
         return Signal(side, bid, quantity, fair, -giveup, 'sell', REASON)
