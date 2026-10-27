@@ -15,13 +15,15 @@ from .shadow import decisions as shadow_decisions
 from .exit_study import checked_exit, experiment as exit_experiment
 from .risk import Exposure, LOSS_FIELD, verify_account_inventory, bind_exposure_modes
 from .settlement import multi_races, verify_review, entry_settings
-from .race_controls import RaceGroups
+from .race_controls import RaceGroups, committed_by_race
 from .profit_exit import profit_exit_mode
 from .exit_coverage import exit_coverage
 from .exit_trend import ExitTrend, assess as assess_exit_trend
 from .strategy import BookValidationError, D, choose
 from .gate_metrics import GateMetrics
 from .settlement_value import exit_settings, gate_exit
+
+RADAR_REUSE_SECONDS = 5  # Election radar and gap radar share one bulk reference read per cycle.
 
 
 class ReservationRejected(ValueError):
@@ -87,6 +89,9 @@ class ActiveEngine(Engine):
         self.election_night = ElectionNight(self.config)
         from .election_night import Radar
         self.radar = Radar(self.election_night)
+        from .gap_radar import GapRadar
+        self.gap_radar = GapRadar(self.config)
+        self._radar_books = None  # (fetched_at, books, skipped, watched): one bulk read serves both radars
         from . import pair_baskets
         pair_baskets.initialize(self.journal.db)
         self.pair_policy = pair_baskets.settings(self.config)
@@ -1080,21 +1085,29 @@ class ActiveEngine(Engine):
             except (ValueError, KeyError, TypeError, sqlite3.Error) as error:
                 self.report('research_followup_skip', {'exchange': exchange, 'reason': str(error)})
 
+    def radar_books(self, now):
+        """Bulk public top-of-book for every enabled race (no SIG reads); shared by both radars."""
+        if self._radar_books is not None and 0 <= now-self._radar_books[0] <= RADAR_REUSE_SECONDS:
+            return self._radar_books[1:]
+        for mapping in self.radar.missing(self.markets):
+            try:
+                self.radar.metadata[mapping['name']] = self.references.metadata(mapping)
+            except (ValueError, KeyError, TypeError, APIError) as error:
+                self.radar.metadata[mapping['name']] = None
+                self.report('election_radar_skip', {'market': mapping['name'], 'reason': str(error)[:120]})
+        items = [(m, self.radar.metadata[m['name']]) for m in self.markets
+                 if self.radar.metadata.get(m['name'])]
+        books, skipped = self.references.radar(items)
+        self._radar_books = (now, books, skipped, len(items))
+        return books, skipped, len(items)
+
     def election_radar(self):
         """Election night: bulk public reference reads flag newly called races for a SIG check."""
         now = time.time()
         if not self.radar.due(now):
             return
         try:
-            for mapping in self.radar.missing(self.markets):
-                try:
-                    self.radar.metadata[mapping['name']] = self.references.metadata(mapping)
-                except (ValueError, KeyError, TypeError, APIError) as error:
-                    self.radar.metadata[mapping['name']] = None
-                    self.report('election_radar_skip', {'market': mapping['name'], 'reason': str(error)[:120]})
-            items = [(m, self.radar.metadata[m['name']]) for m in self.markets
-                     if self.radar.metadata.get(m['name'])]
-            books, skipped = self.references.radar(items)
+            books, skipped, watched = self.radar_books(now)
             names = {m['sig_exchange_id']: m['name'] for m in self.markets}
             fresh = self.radar.update({names[ex]: refs for ex, refs in books.items()}, now)
         except Exception as error:
@@ -1106,7 +1119,78 @@ class ActiveEngine(Engine):
             self.scan_interest.flag(name, 'election_night')
         if fresh or skipped:
             self.report('election_radar', {'called': len(self.radar.called), 'newly_called': fresh,
-                        'watched': len(items), 'skipped': len(skipped)})
+                        'watched': watched, 'skipped': len(skipped)})
+
+    def funding_targets(self, now, night):
+        """Pending coin-blocked buys a sale could fund, with the funding rule in force, or None."""
+        if night:
+            p = self.election_night.policy
+            if not p['recycle_enabled']:
+                return None
+            pending = [dict(v, race=self.races.race(ex)) for ex, v in self.election_night.pending.items()
+                       if now-v['at'] <= p['recycle_pending_seconds']]
+            rule = dict(max_giveup=p['recycle_max_giveup'], min_gain=p['recycle_margin'], called_only=True)
+        else:
+            if not self.rotation.enabled:
+                return None
+            p = self.rotation.policy
+            pending = [v for v in self.rotation.pending.values() if now-v['at'] <= p['pending_seconds']]
+            rule = dict(max_giveup=p['max_giveup'], min_gain=p['min_gain'], called_only=False)
+        return dict(rule, targets=[{k: v[k] for k in ('race', 'ask', 'edge', 'need_coins')}
+                                   for v in pending if v['need_coins'] > 0])
+
+    def gap_radar_step(self):
+        """Bulk-screen every enabled race and put the most valuable at the front of the priority lane.
+
+        Costs one SIG read per 100 contracts plus the shared public reference reads. A flag
+        only schedules a check; the visit applies every ordinary rule to fresh books.
+        """
+        from .gap_radar import Rules, rank, screen
+        from .pair_baskets import locked
+        now = time.time()
+        night = self.election_night.active(now)
+        if not self.execution.get('priority_scanning', True) or not self.gap_radar.due(now, night):
+            return  # Flags only order the priority lane.
+        self.gap_radar.last_run = now
+        try:
+            books, skipped, watched = self.radar_books(now)
+            quotes = self.sig.prices([m['sig_exchange_id'] for m in self.markets])
+            holdings, realized = self.ledger.inventory()
+            held = {ex: v['quantity']*(1 if side == 'yes' else -1) for (ex, side), v in holdings.items()
+                    if v['quantity']}
+            committed = committed_by_race(holdings, realized, self.journal.pending(), self.races.assignments)
+            exposure = Exposure(self.ledger, self.config)
+            rules = Rules(self.gap_radar.policy, self.config, self.election_night if night else None,
+                          self.funding_targets(now, night))
+            screened = []
+            for mapping in self.markets:
+                exchange = mapping['sig_exchange_id']
+                if quotes.get(exchange) is None or books.get(exchange) is None:
+                    continue
+                race, own = self.races.race(exchange), held.get(exchange, D(0))
+                headroom = ({side: exposure.headroom(exchange, 'buy', side) for side in ('yes', 'no')}
+                            if exposure.enabled else None)
+                screened.append((mapping['name'], screen(
+                    quotes[exchange], books[exchange], own, locked(self.journal.db, exchange) if own else D(0),
+                    D(self.config['limits']['per_market'])-committed[race], headroom, rules, race)))
+        except APIError as error:
+            if error.status in (401, 403, 429):
+                raise
+            self.report('gap_radar_skip', {'error_type': 'APIError', 'reason': str(error)[:200]})
+            return
+        except Exception as error:
+            # Screening is optional: any failure must leave ordinary scanning running.
+            self.report('gap_radar_skip', {'error_type': type(error).__name__, 'reason': str(error)[:200]})
+            return
+        flagged = rank(screened, self.gap_radar.policy)
+        self.scan_interest.set_gaps({name: c['value'] for name, c in flagged}, now+self.gap_radar.ttl(night))
+        exchanges = {m['name']: m['sig_exchange_id'] for m in self.markets}
+        self.report('gap_radar', {'phase': 'election_night' if night else 'before_night', 'watched': watched,
+            'screened': len(screened), 'skipped': len(skipped),
+            'candidates': sum(c is not None for _, c in screened),
+            'flagged': [{'exchange': exchanges[name], 'market': name, 'route': c['route'], 'side': c['side'],
+                         'edge': str(round(c['edge'], 4)), 'shares': c['shares'], 'value': str(round(c['value'], 2))}
+                        for name, c in flagged]})
 
     def refresh_drawdown(self):
         """Bounded SIG-only refresh, including holdings outside normal entry scanning."""
@@ -1245,6 +1329,7 @@ class ActiveEngine(Engine):
                 self.observe_research_due()
         else:
             self.observe_research_due()
+        self.gap_radar_step()
         if self.sig.open_orders():
             self.gate_block('open_orders', 'cycle')
             self._scan_status = 'waiting'
@@ -1295,6 +1380,7 @@ class ActiveEngine(Engine):
                     self._scan_metrics['contracts_visited'] += 1
                     self.report('scan_visit', {'exchange':exchange,'market':mapping['name'],
                                 'scan_policy':self.scan_policy, **self.scanner.selection})
+                    self.scan_interest.checked(mapping['name'])
                     if time.time()-self.races.last_order(self.journal, exchange) < self.config['cooldown_seconds']:
                         self.gate_block('race_cooldown', phase, exchange)
                         self.report('skip', {'exchange': exchange, 'reason': 'cooldown'})

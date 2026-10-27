@@ -12,7 +12,8 @@ INTEREST_TTL_SECONDS = 180
 PRICE_COMPARISON_SECONDS = 300
 REFERENCE_MOVE = D('.02')
 NEAR_ENTRY_MARGIN = D('.02')
-INTEREST_SCORES = {'election_night': 250, 'near_entry': 200, 'reference_move': 180, 'owned_position': 100}
+INTEREST_SCORES = {'gap_radar': 260, 'election_night': 250, 'near_entry': 200, 'reference_move': 180,
+                   'owned_position': 100}
 
 
 class ScanInterest:
@@ -20,10 +21,19 @@ class ScanInterest:
     def __init__(self):
         self.watches = {}
         self.previous = {}
+        self.gaps = {}  # name -> (screening value, expiry) from the latest gap-radar run
 
     def invalidate(self, name):
         self.watches.pop(name, None)
         self.previous.pop(name, None)
+
+    def set_gaps(self, values, until):
+        """Replace every gap-radar flag with this run's ranking (name -> value)."""
+        self.gaps = {name: (float(value), until) for name, value in values.items()}
+
+    def checked(self, name):
+        """One check per flag per radar run: the next run flags it again if the gap remains."""
+        self.gaps.pop(name, None)
 
     def flag(self, name, reason, now=None):
         """Keep a race on the priority lane for one interest period."""
@@ -52,18 +62,22 @@ class ScanInterest:
 
     def hints(self, owned, not_before, now=None):
         now = time.time() if now is None else now
-        names = set(owned) | set(self.watches) | set(not_before)
+        names = set(owned) | set(self.watches) | set(not_before) | set(self.gaps)
         result = {}
         for name in names:
             watches = self.watches.get(name, {})
             reasons = [reason for reason, until in watches.items() if until > now]
             self.watches[name] = {reason: until for reason, until in watches.items() if until > now}
+            expires = dict(self.watches[name])
+            value, until = self.gaps.get(name, (0., 0.))
+            if until > now:
+                reasons.append('gap_radar')
+                expires['gap_radar'] = until
             if name in owned:
                 reasons.append('owned_position')
             score = max((INTEREST_SCORES[r] for r in reasons), default=0)
-            result[name] = {'score': score, 'reasons': sorted(reasons),
-                            'expires': dict(self.watches[name]),
-                            'not_before': not_before.get(name, 0)}
+            result[name] = {'score': score, 'reasons': sorted(reasons), 'expires': expires,
+                            'not_before': not_before.get(name, 0), 'value': value if until > now else 0.}
         return result
 
 
@@ -129,6 +143,8 @@ class Scanner:
             hint['reasons'] = [reason for reason in hint['reasons']
                                if reason not in hint['expires'] or hint['expires'][reason] > now]
             hint['score'] = max((INTEREST_SCORES[r] for r in hint['reasons']), default=0)
+        if 'gap_radar' not in hint.get('reasons', []):
+            hint['value'] = 0.
         return hint
 
     def batch(self, priority, size, interests=None):
@@ -147,8 +163,9 @@ class Scanner:
                 if interests is not None and (now < hint.get('not_before', 0)
                         or now-self.last_visits.get(name, 0) < PRIORITY_REVISIT_SECONDS):
                     continue
-                candidates.append((score, -self.last_visits.get(name, 0), m))
-            urgent = max(candidates, key=lambda r: (r[0], r[1]))[2] if candidates else None
+                # Equal scores: the larger gap-radar value first, then the least recently visited.
+                candidates.append((score, hint.get('value', 0.), -self.last_visits.get(name, 0), m))
+            urgent = max(candidates, key=lambda r: (r[0], r[1], r[2]))[3] if candidates else None
             if urgent is not None and self.priority_turn:
                 mapping = urgent
                 self.priority_turn = False
@@ -166,6 +183,8 @@ class Scanner:
             previous = self.last_visits.get(name)
             self.selection = {'lane': lane, 'priority_reasons': reasons,
                 'revisit_seconds': round(now-previous, 3) if previous is not None and now >= previous else None}
+            if hint.get('value'):
+                self.selection['gap_value'] = round(hint['value'], 2)
             self.last_visits[name] = now
             seen.add(name)
             # Persist before yielding: an order/early return cannot reset fairness.

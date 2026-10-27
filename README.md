@@ -167,7 +167,7 @@ Active execution defaults to `execution.priority_scanning: true`. Priority slots
 
 Priority visits wait at least 30 seconds since the last visit and respect each market's order cooldown. A priority selection is always followed by an ordinary cursor selection; when there is no eligible priority request, the slot also goes to ordinary coverage. No market is selected twice within one batch, and early order limits do not reset the ordinary cursor. This guarantees coverage in selections, not a wall-clock deadline during network outages. Ordinary coverage may revisit a race sooner than the priority interval. News remains queued if a visit is skipped for order cooldown.
 
-To compare against ordinary/news-only scheduling, set `execution.priority_scanning` to `false` and restart. This changes scheduling only; budgets, trade thresholds, order counts and API pacing stay the same. Priority scanning makes no extra network requests of its own. Owned-position and near-entry priority can use up to half the selections, so other races may be revisited less often; inspect per-market coverage in the report. Streaming feeds remain a separate future upgrade.
+To compare against ordinary/news-only scheduling, set `execution.priority_scanning` to `false` and restart. This changes scheduling only; budgets, trade thresholds, order counts and API pacing stay the same. Priority scanning makes no extra network requests of its own; the optional [gap radar](docs/gap-radar.md) adds bulk reads and ranks its flags above every hint except pending news. Owned-position and near-entry priority can use up to half the selections, so other races may be revisited less often; inspect per-market coverage in the report. Streaming feeds remain a separate future upgrade.
 
 A read-only six-race validation measured 14.49 seconds uncached and 4.84 seconds cached; this is a small sample excluding order execution. A full sweep and news response can take longer during initialization, active trading, retries or network delays. `python3 scripts/validate_active.py` repeats migration on a copy of the live journal and read-only feed checks; its broker explicitly rejects submission and cancellation. No live journal migration occurs until the actual updated bot starts.
 
@@ -292,7 +292,7 @@ The optional [drawdown control](docs/drawdown-control.md) pauses new buys when b
 
 ### Declining-position entry guard
 
-The optional [position entry guard](docs/position-entry-guard.md) blocks additional purchases after a confirmed two-cent decline in both SIG bid and ask. It requires spaced scan history, persists the pause through restarts and partial sales, and requires two later recovery observations before additions resume. Both market-price and model additions pass it; eligible exits retain priority. The local configuration enables it after worker restart, with a short observation warmup for existing holdings.
+The optional [position entry guard](docs/position-entry-guard.md) blocks additional purchases after a confirmed two-cent decline in both SIG bid and ask. It requires spaced scan history, persists the pause through restarts and partial sales, and requires two later recovery observations before additions resume. Both market-price and model additions pass it; eligible exits retain priority. The local configuration turned it off on October 26: it reads only SIG prices, and it had blocked some of the best entries while Kalshi and Polymarket held steady (RI Senate up to 12.7¢, HI Governor up to 9.6¢). The entry rule already stops buying when the lower reference bid falls.
 
 ### Partial risk-reduction exits
 
@@ -354,6 +354,10 @@ Inside that window, called-race buys also bypass the drawdown pause, the post-re
 ## Pre-election capital rotation
 
 `capital_rotation` (off by default) sells part of a holding whose SIG bid is within 2¢ of reference fair value when that funds an ordinary entry blocked only by coins, with a net gain of at least 3¢ per share sold. It never runs during the election-night window. See [pre-election rotation](docs/pre-election-rotation.md).
+
+## Gap radar
+
+`gap_radar` (off by default) screens every enabled race with one bulk SIG price read per 100 contracts plus the bulk public reference reads. It values each race by the coins one order could earn under the bot's own entry, election-night, exit and funding rules, and sends the most valuable to the front of the priority lane, best first. It runs every 60 seconds before election night and every 20 seconds inside the window. A flag only schedules a check; every trade still passes the full rules. See [gap radar](docs/gap-radar.md).
 
 ## Swing stress test and party-pair scan
 

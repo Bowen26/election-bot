@@ -110,9 +110,17 @@ def report(runtime, config, now=None):
         rotation = [json.loads(d) for (d,) in db.execute(
             "SELECT detail FROM events WHERE kind='capital_rotation_decision' AND at>?", (now-3600,))]
         result['rotation_1h'] = dict(Counter(c.get('reason') for c in rotation))
+        radar = db.execute("SELECT at, detail FROM events WHERE kind='gap_radar' AND at>? ORDER BY at DESC LIMIT 1",
+                           (now-900,)).fetchone()
+        if radar:
+            d = json.loads(radar[1])
+            result['gap_radar'] = {'seconds_ago': round(now-radar[0]), 'screened': d.get('screened'),
+                                   'flagged': [{k: f[k] for k in ('market', 'route', 'side', 'value')}
+                                               for f in d.get('flagged', [])]}
         errors = Counter()
         for kind, d in db.execute("SELECT kind, detail FROM events WHERE at>? AND kind IN "
-                                  "('feed_error','election_radar_skip','drawdown_fair_mark_skip')", (now-900,)):
+                                  "('feed_error','election_radar_skip','gap_radar_skip','drawdown_fair_mark_skip')",
+                                  (now-900,)):
             errors[kind] += 1
         result['errors_15m'] = dict(errors)
     finally:
@@ -121,6 +129,7 @@ def report(runtime, config, now=None):
     result['election_night'] = {'enabled': night.get('enabled', False), 'recycle_enabled': night.get('recycle_enabled', False),
                                 'window': [night.get('start_at', '2026-11-03T18:00:00-05:00'), night.get('end_at', '2026-11-04T12:00:00-05:00')]}
     result['features'] = {'capital_rotation': config.get('capital_rotation', {}).get('enabled', False),
+                          'gap_radar': config.get('gap_radar', {}).get('enabled', False),
                           'pair_baskets': config.get('pair_baskets', {}).get('enabled', False),
                           'settlement_exits': config.get('settlement_exits', {}).get('enabled', False),
                           'alerts': config.get('alerts', {}).get('enabled', False),
@@ -159,6 +168,11 @@ def format_report(r):
     lines.append(f"Basket checks (1h): {r['basket_checks_1h']}")
     if r.get('rotation_1h'):
         lines.append(f"Rotation checks (1h): {r['rotation_1h']}")
+    g = r.get('gap_radar')
+    if g:
+        lines.append(f"Gap radar: {g['seconds_ago']}s ago, {g['screened']} screened; checking first: "
+                     + (', '.join(f"{x['market']} {x['route']} {x['side']} ({x['value']})" for x in g['flagged'][:4])
+                        or 'nothing'))
     lines.append('Orders (1h): ' + ('; '.join(f"{o['market']} {o['action']} {o['side']} {o['filled']}@{o['price']}" for o in r['orders_1h']) or 'none'))
     lines.append(f"Errors (15 min): {r['errors_15m'] or 'none'}")
     n, f = r['election_night'], r['features']

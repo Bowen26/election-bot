@@ -35,7 +35,10 @@ This ignores the window and shows what the rule would buy on recorded quotes. On
 
 ## Before November 3
 
-- **Total limit.** `limits.total` is 90,000 against about 79,000 committed, leaving roughly 11,000 of headroom. Cash is about 21,000. Raise `total`, or plan which holdings to sell, if you want more room on the night.
+- **Total limit.** `limits.total` counts the cost of open holdings, not cash. On October 26 it was raised from 100,000 to 101,000: about 90,700 was committed, so the old limit would have let the route spend only about 9,300 of the roughly 10,000 cash that unlocks at 6pm. Recheck this before the night if realized profit grows.
+- **Keep the Mac awake.** A sleeping Mac cannot trade, and on October 26 nothing held it awake for the bot (sleep after 1 minute idle). Keep it plugged in with the lid open, and run `caffeinate -is` in a spare terminal tab for the whole night, or start the watcher as `caffeinate -is python3 -m election_bot watch --live`.
+- **News-feed blips.** When no news feed has succeeded for `news.max_feed_silence_seconds`, all buying pauses, including this route. With 300 seconds this happened at least 25 times on October 26, for 1–2 minutes each. It is now 900.
+- **Gap radar.** With `gap_radar` enabled, the 6pm opening checks the races with the biggest gaps first instead of in visit order. See [gap radar](gap-radar.md).
 - **Buy pause.** The bid-based drawdown pause was active on Oct 19. Switch `drawdown_control.valuation` to `reference_fair` (see [settlement value](settlement-value.md)), or this route will be blocked.
 - **API limits.** The platform allows 100 reads and 30 writes per minute. `max_orders_per_cycle` (4) and `poll_seconds` (20) keep the bot well under them.
 - **Dry run.** Shift the window to the next hour, start the bot in paper mode and confirm `election_night_decision` events appear:
@@ -78,6 +81,7 @@ During the window, every `radar_seconds` (20) the bot reads top-of-book for ever
 - **Staying on the priority lane:** a race keeps priority only while SIG still lags (an eligible buy, or one cut short by cash), so ~60 safe favorites don't monopolize the lane.
 - **Read priority:** research follow-up quotes pause (`pause_research_reads`), and drawdown refreshes are trimmed to `drawdown_refresh_per_cycle` (2), so SIG reads go to trading. The client already spaces SIG reads at least 0.8 s apart. Each `scan_complete` now reports `sig_reads_last_minute`.
 - **Failures:** if the radar fails, it is reported as `election_radar_skip`; ordinary scanning continues.
+- **Gap radar:** when `gap_radar` is enabled, it reuses this cycle's bulk reference read, adds one bulk SIG price read per 100 contracts, and ranks every race by the coins an order could earn (called-race buys, ordinary entries, exits and recycling sales). Its flags outrank this radar's. See [gap radar](gap-radar.md).
 - **Fix:** the post-sale reentry cooldown is now also exempted at reservation for election-night buys (when `ignore_reentry_cooldown` is true). Previously the reservation check still blocked them.
 
 ## Alerts

@@ -1,6 +1,6 @@
 # Guard against adding to declining positions
 
-The installed local configuration enables `position_entry_guard`; the example defaults to disabled. This control blocks additional buys in an existing contract when SIG prices show a confirmed decline. It does not sell holdings or block the first purchase in a flat contract, and it does not replace the portfolio drawdown control.
+The example configuration leaves `position_entry_guard` disabled, and the local configuration turned it off on October 26, 2026. The guard reads only SIG prices. Since October 15 it had blocked entries that passed the 5¢ edge check while Kalshi and Polymarket held steady: RI Senate up to 12.7¢, HI Governor up to 9.6¢, ID Governor 7.8¢ and MA Governor 7.0¢. The entry rule already stops buying when the lower reference bid falls. The election-night route bypasses the guard either way. This control blocks additional buys in an existing contract when SIG prices show a confirmed decline. It does not sell holdings or block the first purchase in a flat contract, and it does not replace the portfolio drawdown control.
 
 ```json
 "position_entry_guard": {

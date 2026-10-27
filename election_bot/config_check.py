@@ -28,6 +28,8 @@ def report(config_path):
         'night_ignores_drawdown': get('election_night', 'ignore_drawdown_pause', True),
         'night_ignores_exposure_caps': get('election_night', 'ignore_exposure_caps', True),
         'capital_rotation': get('capital_rotation', 'enabled', False),
+        'gap_radar': get('gap_radar', 'enabled', False),
+        'position_entry_guard': get('position_entry_guard', 'enabled', False),
         'pair_baskets': get('pair_baskets', 'enabled', False),
         'research_followups': get('research_followups', 'enabled', False),
         'alerts': get('alerts', 'enabled', False),

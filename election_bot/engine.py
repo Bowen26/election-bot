@@ -21,6 +21,8 @@ def validate_config(config):
     drawdown_settings(config)
     from .position_guard import settings as position_guard_settings
     position_guard_settings(config)
+    from .gap_radar import settings as gap_radar_settings
+    gap_radar_settings(config)
     from .risk_exit import settings as risk_exit_settings
     risk_exit_settings(config)
     from .model_live import settings as model_settings
