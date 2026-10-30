@@ -7,6 +7,9 @@ import urllib.error
 from unittest.mock import Mock, patch
 
 from election_bot.clients import APIError, HTTP, Sig, RecoveryHistoryUnavailable
+from election_bot.manual_release import ReleaseRefused
+from election_bot.strategy import D
+from election_bot.supervisor import HALT, failure_code
 from tests import test_active
 
 
@@ -238,3 +241,124 @@ class AdvancingRecoveryCheckpointTests(unittest.TestCase):
         s = self.client([self.page(more=True), self.page(sequence=101)])
         s.check_clock.side_effect = RuntimeError('invalid clock')
         with self.assertRaisesRegex(RuntimeError, 'invalid clock'): s.recovery_history('2')
+
+
+class FakeClock:
+    """Wall and monotonic time that advance only when the release wait sleeps."""
+    def __init__(self, now, on_sleep=None):
+        self.now, self.slept, self.on_sleep = now, 0, on_sleep
+
+    def time(self):
+        return self.now
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+        self.slept += seconds
+        if self.on_sleep:
+            self.on_sleep()
+
+
+class AutoReleaseTests(unittest.TestCase):
+    """SIG history stays incomplete: with release_unplaced, recovery runs the operator release checks."""
+    def setUp(self):
+        self.f = test_active.ActiveTests()
+        self.f.setUp()
+        self.addCleanup(self.f.doCleanups)
+        self.e, self.j, self.s = self.f.engine, self.f.journal, self.f.sig
+        self.e.config['auto_recovery'] = {'enabled': True, 'release_unplaced': True}
+        self.s.recovery_history = Mock(side_effect=RecoveryHistoryUnavailable('coverage unavailable'))
+        self.s.read = Mock(return_value={'data': [], 'coverage': {'complete': False, 'projectedThroughSequence': 5},
+                                         'pagination': {'hasMore': False, 'nextCursor': None}})
+        self.s.place = Mock(side_effect=APIError('expired', status=400, method='POST', venue='SIG',
+                                                 rejection='expired_order'))
+        patcher = patch('election_bot.expired_recovery.time.sleep')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def reserve(self, expired_seconds_ago):
+        expired = time.time()-expired_seconds_ago
+        self.payload = {'idempotencyKey': 'uncertain', 'exchangeId': '2', 'side': 'yes', 'action': 'buy',
+                        'quantity': 10, 'price': .6, 'tournamentId': self.s.tid,
+                        'expirationDate': datetime.fromtimestamp(expired, timezone.utc).isoformat()}
+        self.j.reserve(self.payload, '6.10')
+        self.j.db.execute('UPDATE orders SET created=?', (expired-15,))
+        self.j.db.commit()
+
+    def kinds(self):
+        return [kind for (kind,) in self.j.db.execute('SELECT kind FROM events ORDER BY rowid')]
+
+    def detail(self, kind):
+        return json.loads(self.j.db.execute('SELECT detail FROM events WHERE kind=?', (kind,)).fetchone()[0])
+
+    def assert_retained(self):
+        self.assertEqual([r['key'] for r in self.j.pending()], ['uncertain'])
+        self.assertEqual(self.j.db.execute('SELECT COUNT(*) FROM executions').fetchone()[0], 0)
+
+    def test_releases_once_operator_checks_pass(self):
+        self.reserve(700)
+        self.e.reconcile(replay_unknown=True)
+        self.s.place.assert_called_once_with(self.payload)
+        self.assertFalse(self.j.pending())
+        self.assertEqual(D(self.j.db.execute("SELECT quantity FROM executions WHERE key='uncertain'").fetchone()[0]), 0)
+        evidence = self.detail('auto_released_unplaced')
+        self.assertEqual(evidence['coverage'][0]['complete'], False)
+        self.assertIsNone(evidence['request_listed_on_sig'])
+        self.assertEqual(self.detail('recovery_complete')['outcome'], 'auto_released_unplaced')
+        self.assertNotIn('auto_release_wait', self.kinds())
+        self.assertNotIn('operator_released_unplaced', self.kinds())
+
+    def test_incomplete_second_read_also_falls_back(self):
+        self.reserve(700)
+        self.s.recovery_history.side_effect = [{'orders': [], 'sequence': 100},
+                                              RecoveryHistoryUnavailable('coverage unavailable')]
+        self.e.reconcile(replay_unknown=True)
+        self.assertFalse(self.j.pending())
+        self.assertIn('auto_released_unplaced', self.kinds())
+        self.assertNotIn('expired_request_verified_unplaced', self.kinds())
+
+    def test_waits_until_ten_minutes_after_expiration(self):
+        self.reserve(200)
+        clock = FakeClock(time.time())
+        with patch('election_bot.manual_release.time', clock):
+            self.e.reconcile(replay_unknown=True)
+        self.assertFalse(self.j.pending())
+        self.assertAlmostEqual(self.detail('auto_release_wait')['wait_seconds'], 400, delta=5)
+        self.assertGreaterEqual(clock.slept, 395)
+
+    def test_stop_ends_supervised_wait_with_reservation_retained(self):
+        self.reserve(200)
+        self.e.recovery_stop_guard = True
+        clock = FakeClock(time.time(), on_sleep=lambda: (self.e.runtime/'STOP').touch())
+        with patch('election_bot.manual_release.time', clock), self.assertRaises(KeyboardInterrupt):
+            self.e.reconcile(replay_unknown=True)
+        self.assert_retained()
+        self.s.read.assert_not_called()
+
+    def test_refusal_halts_with_reservation_retained(self):
+        self.reserve(700)
+        self.s.cash += D(6)  # Cash moved as if the request had filled.
+        with self.assertRaisesRegex(ReleaseRefused, 'Automatic release refused: SIG cash') as caught:
+            self.e.reconcile(replay_unknown=True)
+        self.assertEqual(failure_code(caught.exception), HALT)
+        self.assert_retained()
+        self.assertNotIn('auto_released_unplaced', self.kinds())
+
+    def test_other_recovery_failures_never_fall_back(self):
+        self.reserve(700)
+        self.s.recovery_history.side_effect = None
+        self.s.recovery_history.return_value = {'orders': [{'id': 123}], 'sequence': 100}
+        with self.assertRaisesRegex(RuntimeError, 'Unrecognized'):
+            self.e.reconcile(replay_unknown=True)
+        self.s.read.assert_not_called()
+        self.assert_retained()
+
+    def test_off_unless_configured(self):
+        self.e.config['auto_recovery'] = {'enabled': True}
+        self.reserve(700)
+        with self.assertRaises(RecoveryHistoryUnavailable):
+            self.e.reconcile(replay_unknown=True)
+        self.s.read.assert_not_called()
+        self.assert_retained()

@@ -25,7 +25,9 @@ class ClassificationTests(unittest.TestCase):
         for record in unsafe:
             self.assertIsNone(recoverable(record), record)
         self.assertFalse(auto_settings({})['enabled'])
-        for bad in ({'enabled': 'yes'}, {'max_per_hour': 0}, {'x': 1}):
+        self.assertFalse(auto_settings({})['release_unplaced'])
+        self.assertTrue(auto_settings({'auto_recovery': {'release_unplaced': True}})['release_unplaced'])
+        for bad in ({'enabled': 'yes'}, {'max_per_hour': 0}, {'x': 1}, {'release_unplaced': 'yes'}):
             with self.assertRaises(ValueError):
                 auto_settings({'auto_recovery': bad})
 

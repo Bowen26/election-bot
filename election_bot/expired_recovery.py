@@ -3,11 +3,13 @@
 An expiry rejection alone cannot prove the original submission was unfilled.
 Require complete history containing only already-accounted orders and matching
 account inventory twice. Unknown orders are never guessed into a local request.
+When SIG keeps the market's history incomplete, `auto_recovery.release_unplaced`
+hands the decision to the operator release checks (manual_release.py) instead.
 """
 import json
 import time
 
-from .clients import iso_time
+from .clients import RecoveryHistoryUnavailable, iso_time
 from .risk import verify_account_inventory
 from .strategy import D
 
@@ -55,7 +57,15 @@ def recover_rejected_expiration(engine, row, payload):
     for attempt in range(2):
         if attempt:
             time.sleep(1)
-        history = engine.sig.recovery_history(payload['exchangeId'])
+        try:
+            history = engine.sig.recovery_history(payload['exchangeId'])
+        except RecoveryHistoryUnavailable:
+            from .supervisor import auto_settings
+            if not auto_settings(engine.config)['release_unplaced']:
+                raise
+            from .manual_release import release_after_incomplete_history
+            release_after_incomplete_history(engine, row, payload)
+            return
         ids = accounted_history(engine, payload, history['orders'])
         # Confirm history reads bracket a complete portfolio comparison.
         verify_account_inventory(engine.ledger, engine.sig.positions())

@@ -49,7 +49,9 @@ def restartable(code):
 # Auto-recovery: halts that a reconciliation plus restart is known to resolve. Anything
 # else (accounting inconsistencies, contract changes, loss stop, auth, config) still halts.
 # stall_seconds: kill and reconcile a worker whose main loop stops beating (0 disables).
-AUTO_DEFAULTS = dict(enabled=False, max_per_hour=6, stall_seconds=600)
+# release_unplaced: when SIG keeps a market's order history incomplete, `recover` runs the
+# operator release checks itself (manual_release.py) instead of halting on that one order.
+AUTO_DEFAULTS = dict(enabled=False, max_per_hour=6, stall_seconds=600, release_unplaced=False)
 STALL_CHECK_SECONDS = 5
 # A longer gap between watcher loop turns means the Mac was asleep (lid closed, brief
 # background wakes). The worker could not beat either, so stall time restarts at wake.
@@ -72,6 +74,8 @@ def auto_settings(config):
         raise ValueError('auto_recovery max_per_hour must be an integer from 1 to 20')
     if type(p['stall_seconds']) is not int or not (p['stall_seconds'] == 0 or 120 <= p['stall_seconds'] <= 7200):
         raise ValueError('auto_recovery stall_seconds must be 0 or an integer from 120 to 7200')
+    if type(p['release_unplaced']) is not bool:
+        raise ValueError('auto_recovery release_unplaced must be boolean')
     return p
 
 

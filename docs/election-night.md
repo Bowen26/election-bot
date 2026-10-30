@@ -120,6 +120,8 @@ Enable by adding `"recycle_enabled": true` to the `election_night` block and res
 
 **How it recovers:** the watcher waits (15 s, doubling up to 5 min; at least 60 s after a 429), runs `recover --wait`, then resumes trading. If that reconciliation fails, the bot halts normally; there is no retry loop. More than `max_per_hour` recoveries sets STOP. Each recovery sends an `auto_recovering` alert.
 
+**Orders SIG never recorded (`release_unplaced`):** after an uncertain submission, such as an HTTP 502, recovery checks SIG's order history to confirm the order never went through. SIG keeps some markets' history marked incomplete (TX-15 and NC Senate each omit an old unfilled order), so that check fails on every retry. On October 28 this set STOP and kept the bot off for more than a day. With `"release_unplaced": true` in `auto_recovery`, recovery instead runs the `release-unplaced` checks from the README: no open orders, positions and cash match the bot's records, and nothing filled. It runs them once the order has been expired 10 minutes, then resumes trading. The bot does not trade during that wait. If any check fails, the bot halts and keeps the order's coins reserved; review it with `release-unplaced --dry-run`.
+
 **Still halts and alerts you:** everything else, including accounting inconsistencies, contract changes, the realized-loss stop, auth failures and configuration errors.
 
 **Sleep:** with the lid closed, macOS wakes briefly about once a minute without running the bot. The watcher treats a gap of more than 30 s between its own loop turns as sleep and restarts the stall window at wake, so it does not stop and recover a healthy worker after every wake. Keep the Mac plugged in with the lid open on election night: a sleeping Mac cannot trade.

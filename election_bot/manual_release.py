@@ -1,4 +1,4 @@
-"""One-time operator release of an unacknowledged order that SIG never recorded.
+"""Release of an unacknowledged order that SIG never recorded, by the operator or by recovery.
 
 Normal recovery releases a reservation only when SIG marks the market's order history
 complete. If SIG's history for one market stays incomplete, that single reservation
@@ -15,7 +15,8 @@ with the evidence recovery uses plus two independent account-wide checks:
   request would have moved cash by more than the tolerance.
 
 Every read is taken twice and must agree. Nothing changes unless every check passes.
-It never runs automatically: the operator names the order key.
+The operator names the order key. With `auto_recovery.release_unplaced`, `recover` also
+runs these checks itself, but only after SIG's history fails expired-request recovery.
 """
 import json
 import time
@@ -26,6 +27,8 @@ from .strategy import D
 
 MIN_EXPIRED_SECONDS = 600
 CASH_TOLERANCE = D('0.01')  # SIG reports cash in cents.
+STARTING_CASH = '100000'  # Tournament starting balance; also the release-unplaced --starting-cash default.
+AUTO_EVENT = 'auto_released_unplaced'
 
 
 class ReleaseRefused(RuntimeError):
@@ -112,7 +115,7 @@ def implied_cash(db, starting_cash):
 
 
 def release_unplaced(journal, ledger, sig, order_key, starting_cash, fee, now=None, sleep=time.sleep,
-                     dry_run=False):
+                     dry_run=False, event='operator_released_unplaced'):
     now = time.time() if now is None else now
     pending = journal.pending()
     if len(pending) != 1 or pending[0]['key'] != order_key:
@@ -162,7 +165,43 @@ def release_unplaced(journal, ledger, sig, order_key, starting_cash, fee, now=No
         return dict(detail, released=False, dry_run=True, would_release=row['amount'])
     # Evidence and the zero execution form one transaction: never one without the other.
     with journal.db:
-        journal.db.execute('INSERT INTO events VALUES (?,?,?)',
-                           (time.time(), 'operator_released_unplaced', json.dumps(detail)))
+        journal.db.execute('INSERT INTO events VALUES (?,?,?)', (time.time(), event, json.dumps(detail)))
         ledger.record(payload, 0, 0, fee)
     return dict(detail, released=True, released_reservation=row['amount'])
+
+
+def release_after_incomplete_history(engine, row, payload, starting_cash=STARTING_CASH):
+    """Recovery fallback once expired-request recovery found SIG's market history incomplete.
+
+    Waits until the request has been expired MIN_EXPIRED_SECONDS (STOP ends a supervised wait),
+    then applies every check above and records AUTO_EVENT. A refusal halts for review with the
+    reservation retained; it is never retried as an incomplete-history recovery."""
+    ready = iso_time(payload['expirationDate'])+MIN_EXPIRED_SECONDS
+    delay = ready-time.time()
+    if delay > MIN_EXPIRED_SECONDS:
+        raise RuntimeError('Automatic release wait is unexpectedly long; review the clock and journal; '
+                           'reservation retained')
+    if delay > 0:
+        engine.report('auto_release_wait', {'exchange': payload['exchangeId'], 'order_key': row['key'],
+            'wait_seconds': round(delay, 2),
+            'action': 'No new trades; SIG history is incomplete, so release checks run %d seconds after '
+                      'expiration' % MIN_EXPIRED_SECONDS})
+        deadline = time.monotonic()+delay+60
+        while time.time() < ready:
+            if getattr(engine, 'recovery_stop_guard', False) and engine.stopped():
+                raise KeyboardInterrupt
+            if time.monotonic() >= deadline:
+                raise RuntimeError('Automatic release wait exceeded its clock bound; reservation retained')
+            time.sleep(min(.25, max(0, ready-time.time())))
+    # Fresh SIG timing, so "expired long enough" also holds on SIG's clock.
+    engine.sig.account()
+    engine.check_clock()
+    try:
+        result = release_unplaced(engine.journal, engine.ledger, engine.sig, row['key'], D(starting_cash),
+                                  D(engine.config['strategy']['cost_buffer_per_share']),
+                                  sleep=time.sleep, event=AUTO_EVENT)
+    except ReleaseRefused as error:
+        raise ReleaseRefused('Automatic release refused: %s; reservation retained' % error) from error
+    engine.report('recovery_complete', {'exchange': payload['exchangeId'], 'outcome': AUTO_EVENT,
+                                        'released_reservation': result['released_reservation']})
+    return result
